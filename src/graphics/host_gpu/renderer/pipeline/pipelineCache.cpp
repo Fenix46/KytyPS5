@@ -43,7 +43,10 @@ namespace Libs::Graphics {
 
 namespace {
 
-constexpr auto DriverCacheSaveInterval = std::chrono::minutes {1};
+// Serializing the driver cache holds its lock, so pipeline creation waits for it and the frame
+// drops. The file only grows (16 MB+ after a few minutes of play), so every save costs more; the
+// final save at exit still writes whatever is pending.
+constexpr auto DriverCacheSaveInterval = std::chrono::minutes {10};
 
 uint8_t RemapSourceAlphaFactor(uint8_t factor) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {
