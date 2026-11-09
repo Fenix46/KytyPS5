@@ -787,6 +787,10 @@ static int kyty_vprintf(const char* format, VaList* va_list) {
 	return kyty_printf_internal(false, nullptr, 0, format, va_list);
 }
 
+static int kyty_vsnprintf(char* s, size_t n, const char* format, VaList* va_list) {
+	return kyty_printf_internal(true, s, n, format, va_list);
+}
+
 static int kyty_printf_ctx(VaContext* ctx) {
 	const char* format = VaArg_ptr<const char>(&ctx->va_list);
 
@@ -817,6 +821,10 @@ guest_printf_ctx_func_t GetGuestPrintfCtxFunc() {
 
 guest_snprintf_ctx_func_t GetGuestSnprintfCtxFunc() {
 	return kyty_snprintf_ctx;
+}
+
+guest_vsnprintf_func_t GetGuestVsnprintfFunc() {
+	return kyty_vsnprintf;
 }
 
 guest_vprintf_func_t GetGuestVprintfFunc() {

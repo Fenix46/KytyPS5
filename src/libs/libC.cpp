@@ -514,6 +514,63 @@ static KYTY_SYSV_ABI int std_execute_once(int* flag, execute_once_func_t func, v
 	return result;
 }
 
+// Itanium C++ ABI thread-safe static initialization guards.
+// guard byte 0 = initialized, byte 1 = initialization in progress.
+static std::mutex              g_cxa_guard_mutex;
+static std::condition_variable g_cxa_guard_cv;
+
+static KYTY_SYSV_ABI int cxa_guard_acquire(uint8_t* guard) {
+	PRINT_NAME();
+
+	if (guard == nullptr) {
+		return 0;
+	}
+
+	std::unique_lock lock(g_cxa_guard_mutex);
+	while (guard[0] == 0 && guard[1] != 0) {
+		g_cxa_guard_cv.wait_for(lock, std::chrono::microseconds(10000));
+		if (guard[0] == 0 && guard[1] != 0) {
+			lock.unlock();
+			LibKernel::KernelDispatchPendingSignalForCurrentThread();
+			lock.lock();
+		}
+	}
+	if (guard[0] != 0) {
+		return 0;
+	}
+	guard[1] = 1;
+	return 1;
+}
+
+static KYTY_SYSV_ABI void cxa_guard_release(uint8_t* guard) {
+	PRINT_NAME();
+
+	if (guard == nullptr) {
+		return;
+	}
+
+	{
+		std::lock_guard lock(g_cxa_guard_mutex);
+		guard[0] = 1;
+		guard[1] = 0;
+	}
+	g_cxa_guard_cv.notify_all();
+}
+
+static KYTY_SYSV_ABI void cxa_guard_abort(uint8_t* guard) {
+	PRINT_NAME();
+
+	if (guard == nullptr) {
+		return;
+	}
+
+	{
+		std::lock_guard lock(g_cxa_guard_mutex);
+		guard[1] = 0;
+	}
+	g_cxa_guard_cv.notify_all();
+}
+
 static KYTY_SYSV_ABI int cxa_atexit(cxa_destructor_func_t func, void* arg, void* d) {
 	PRINT_NAME();
 
@@ -617,6 +674,12 @@ int KYTY_SYSV_ABI vprintf(const char* str, VaList* c) {
 	PRINT_NAME();
 
 	return GetGuestVprintfFunc()(str, c);
+}
+
+static KYTY_SYSV_ABI int vsnprintf(char* s, size_t n, const char* format, VaList* c) {
+	PRINT_NAME();
+
+	return GetGuestVsnprintfFunc()(s, n, format, c);
 }
 
 static KYTY_SYSV_ABI int snprintf(VA_ARGS) {
@@ -791,6 +854,7 @@ LIB_DEFINE(InitLibcInternal_1) {
 	LIB_FUNC("2WE3BTYVwKM", LibcInternal::cos);
 	LIB_FUNC("jMB7EFyu30Y", LibcInternal::sincos);
 	LIB_FUNC("eLdDw6l0-bU", LibcInternal::snprintf);
+	LIB_FUNC("Q2V+iqvjgC0", LibcInternal::vsnprintf);
 
 	LIB_FUNC("L1SBTkC+Cvw", LibC::abort);
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
@@ -827,6 +891,10 @@ LIB_DEFINE(InitLibC_1) {
 	LIB_FUNC("tsvEmnenz48", LibC::cxa_atexit);
 	LIB_FUNC("H2e8t5ScQGc", LibC::cxa_finalize);
 	LIB_FUNC("DiGVep5yB5w", LibC::std_execute_once);
+	LIB_FUNC("Q2V+iqvjgC0", LibcInternal::vsnprintf);
+	LIB_FUNC("3GPpjQdAMTw", LibC::cxa_guard_acquire);
+	LIB_FUNC("9rAeANT2tyE", LibC::cxa_guard_release);
+	LIB_FUNC("2emaaluWzUw", LibC::cxa_guard_abort);
 }
 
 } // namespace LibC
