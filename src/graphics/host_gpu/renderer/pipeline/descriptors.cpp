@@ -424,6 +424,7 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 		return false;
 	}
 	ImageInfo physical = info;
+	const bool own_chain = base_level >= physical_levels;
 	// A view entirely past MAX_MIP addresses its own chain starting at its base mip (PPSA02110
 	// compresses mip 1 through a T# that declares one level).
 	if (base_level >= physical_levels) {
@@ -457,6 +458,14 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	if (metadata ||
 	    (info.TransferLayers() > 1 && physical.tiled_slice_stride != info.tiled_slice_stride)) {
 		return false;
+	}
+	if (own_chain && view_levels == 1) {
+		// Fallback (fork experiment): a view past MAX_MIP is its own one-level chain.
+		LOGF("[mip view fallback] own chain at mip %u
+", base_level);
+		info       = std::move(physical);
+		base_level = 0;
+		return true;
 	}
 	// T# addresses the last mip. A view can select the same stored subresources
 	// with different mip indices; inaccessible mips need no host representation.
