@@ -445,6 +445,12 @@ static size_t _strnlen_s(const Char* str, size_t maxsize) {
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* format,
                                 VaList* va_list) {
+	// Diagnostic: log the format string before formatting, so a crash inside a conversion can be traced.
+	if (reinterpret_cast<uintptr_t>(format) >= 0x10000u) {
+		LOGF("[guest printf] sn=%d fmt=\"%s\"
+", sn ? 1 : 0, format);
+	}
+
 	std::vector<char> buffer;
 
 	uint32_t flags     = 0;
