@@ -449,7 +449,54 @@ static int Main(int argc, char* argv[]) {
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+// The emulator waits on millisecond timeouts (event loop, frame fences). With the default ~15 ms
+// system timer, and with Windows throttling a process it considers background, those waits run
+// long and frame pacing gets uneven while the GPU sits half idle. Games and emulators opt out.
+static void PreferResponsiveTimers() {
+	using NtSetTimerResolutionFn = LONG(NTAPI*)(ULONG, BOOLEAN, PULONG);
+	using SetProcessInformationFn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+
+	if (const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll"); ntdll != nullptr) {
+		if (const auto set_resolution = reinterpret_cast<NtSetTimerResolutionFn>(
+		        reinterpret_cast<void*>(GetProcAddress(ntdll, "NtSetTimerResolution")));
+		    set_resolution != nullptr) {
+			ULONG actual = 0;
+			set_resolution(5000, TRUE, &actual); // 0.5 ms, in 100 ns units
+		}
+	}
+
+	if (const HMODULE kernel = GetModuleHandleW(L"kernel32.dll"); kernel != nullptr) {
+		if (const auto set_information = reinterpret_cast<SetProcessInformationFn>(
+		        reinterpret_cast<void*>(GetProcAddress(kernel, "SetProcessInformation")));
+		    set_information != nullptr) {
+			struct PowerThrottlingState {
+				ULONG version;
+				ULONG control_mask;
+				ULONG state_mask;
+			};
+			constexpr int   process_power_throttling             = 4;
+			constexpr ULONG throttling_execution_speed           = 0x1;
+			constexpr ULONG throttling_ignore_timer_resolution   = 0x4;
+			// A control bit with its state bit clear turns that throttling off.
+			PowerThrottlingState state {1,
+			                            throttling_execution_speed | throttling_ignore_timer_resolution,
+			                            0};
+			set_information(GetCurrentProcess(), process_power_throttling, &state, sizeof(state));
+		}
+	}
+}
+
 int wmain(int argc, wchar_t* argv[]) {
+    PreferResponsiveTimers();
+
     std::vector<std::string> utf8_args;
     utf8_args.reserve(static_cast<size_t>(argc));
 
