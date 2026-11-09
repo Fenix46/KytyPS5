@@ -128,14 +128,24 @@ void ShaderStoreWriter::Post(Common::UniqueFunction<void>&& job) {
 	m_ready.notify_one();
 }
 
-void PipelineCache::WarmUp(const std::filesystem::path& path) {
-	if (path.empty()) {
+void PipelineCache::WarmUp(const std::filesystem::path& base_path) {
+	if (base_path.empty()) {
 		return;
 	}
 	const auto header = StoreHeader(m_graphics);
 	if (header.empty()) {
 		return;
 	}
+	// One store per header: a different GPU/driver or recompiler setting (--relaxed-shader-float,
+	// ...) used to make the next boot discard and rewrite the whole store. Now it starts its own.
+	const auto path = [&] {
+		auto named = base_path;
+		named.replace_filename(base_path.stem().string() +
+		                       fmt::format(".{:08x}", static_cast<uint32_t>(
+		                                                  XXH3_64bits(header.data(), header.size()))) +
+		                       base_path.extension().string());
+		return named;
+	}();
 	const auto           start = std::chrono::steady_clock::now();
 	std::vector<uint8_t> bytes;
 	if (Common::File file;
