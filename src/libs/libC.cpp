@@ -673,13 +673,17 @@ static uint32_t g_need_flag = 1;
 int KYTY_SYSV_ABI vprintf(const char* str, VaList* c) {
 	PRINT_NAME();
 
-	return GetGuestVprintfFunc()(str, c);
+	// Format on a copy: callers often reuse the same va_list for a measuring pass and a writing pass.
+	VaList copy = *c;
+	return GetGuestVprintfFunc()(str, &copy);
 }
 
 static KYTY_SYSV_ABI int vsnprintf(char* s, size_t n, const char* format, VaList* c) {
 	PRINT_NAME();
 
-	return GetGuestVsnprintfFunc()(s, n, format, c);
+	// Format on a copy: callers often reuse the same va_list for a measuring pass and a writing pass.
+	VaList copy = *c;
+	return GetGuestVsnprintfFunc()(s, n, format, &copy);
 }
 
 static KYTY_SYSV_ABI int snprintf(VA_ARGS) {
