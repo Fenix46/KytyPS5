@@ -56,6 +56,7 @@ void GraphicContext::DestroyAllocator() {
 	if (allocator == nullptr) {
 		return;
 	}
+	FlushImagePool();
 	vmaDestroyAllocator(allocator);
 	allocator = nullptr;
 }
@@ -146,23 +147,85 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
 }
 
+// Images freed by the texture cache are kept and handed back to identical requests: creating and
+// destroying device memory dominates the time spent loading levels.
+static constexpr size_t   IMAGE_POOL_MAX_ENTRIES = 64;
+static constexpr uint64_t IMAGE_POOL_MAX_BYTES   = 256ull * 1024 * 1024;
+
+void GraphicContext::FlushImagePool() {
+	std::vector<PooledImage> pool;
+	{
+		std::lock_guard lock(m_image_pool_mutex);
+		pool.swap(m_image_pool);
+		m_image_pool_bytes = 0;
+	}
+	for (const auto& pooled: pool) {
+		vmaDestroyImage(allocator, pooled.image, pooled.allocation);
+	}
+}
+
 bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanImage& image) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image != nullptr || image.allocation != nullptr);
+
+	const bool poolable = image_info.pNext == nullptr &&
+	                      image_info.tiling == vk::ImageTiling::eOptimal &&
+	                      image_info.initialLayout == vk::ImageLayout::eUndefined &&
+	                      image_info.sharingMode == vk::SharingMode::eExclusive;
+
+	if (poolable) {
+		std::lock_guard lock(m_image_pool_mutex);
+		for (size_t i = m_image_pool.size(); i-- > 0;) {
+			const auto& p = m_image_pool[i];
+			if (p.format == image_info.format && p.image_type == image_info.imageType &&
+			    p.extent.width == image_info.extent.width &&
+			    p.extent.height == image_info.extent.height &&
+			    p.extent.depth == image_info.extent.depth && p.layers == image_info.arrayLayers &&
+			    p.mip_levels == image_info.mipLevels &&
+			    p.samples == static_cast<uint32_t>(image_info.samples) &&
+			    p.usage == image_info.usage && p.flags == image_info.flags) {
+				image.image      = p.image;
+				image.allocation = p.allocation;
+				m_image_pool_bytes -= p.size;
+				m_image_pool.erase(m_image_pool.begin() + static_cast<std::ptrdiff_t>(i));
+				image.format     = image_info.format;
+				image.image_type = image_info.imageType;
+				image.extent     = image_info.extent;
+				image.layers     = image_info.arrayLayers;
+				image.mip_levels = image_info.mipLevels;
+				image.samples    = static_cast<uint32_t>(image_info.samples);
+				image.usage      = image_info.usage;
+				image.flags      = image_info.flags;
+				image.state      = {.layout = image_info.initialLayout};
+				image.subresource_states.clear();
+				image.poolable = true;
+				return true;
+			}
+		}
+	}
 
 	VmaAllocationCreateInfo alloc_info {};
 	alloc_info.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
 	alloc_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 
 	vk::Image::CType native_image = VK_NULL_HANDLE;
-	const auto        result       = static_cast<vk::Result>(
-	    vmaCreateImage(allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
-	                   &alloc_info, &native_image, &image.allocation, nullptr));
+	auto             result       = static_cast<vk::Result>(vmaCreateImage(
+        allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info), &alloc_info,
+        &native_image, &image.allocation, nullptr));
+	if (result != vk::Result::eSuccess) {
+		// Cached images may be what is taking the memory: release them and retry once.
+		FlushImagePool();
+		native_image = VK_NULL_HANDLE;
+		result       = static_cast<vk::Result>(vmaCreateImage(
+            allocator, static_cast<const vk::ImageCreateInfo::NativeType*>(image_info),
+            &alloc_info, &native_image, &image.allocation, nullptr));
+	}
 	image.image = native_image;
 	if (result != vk::Result::eSuccess) {
 		LogMemoryBudget();
 		return false;
 	}
+	image.poolable = poolable;
 
 	image.format     = image_info.format;
 	image.image_type = image_info.imageType;
@@ -182,9 +245,47 @@ void GraphicContext::DeleteImage(VulkanImage& image) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(allocator == nullptr || image.image == nullptr || image.allocation == nullptr);
 
-	vmaDestroyImage(allocator, image.image, image.allocation);
+	bool pooled = false;
+	std::vector<PooledImage> evicted;
+	if (image.poolable) {
+		VmaAllocationInfo allocation_info {};
+		vmaGetAllocationInfo(allocator, image.allocation, &allocation_info);
+		const uint64_t size = allocation_info.size;
+
+		std::lock_guard lock(m_image_pool_mutex);
+		if (size <= IMAGE_POOL_MAX_BYTES) {
+			while (!m_image_pool.empty() && (m_image_pool.size() >= IMAGE_POOL_MAX_ENTRIES ||
+			                                 m_image_pool_bytes + size > IMAGE_POOL_MAX_BYTES)) {
+				m_image_pool_bytes -= m_image_pool.front().size;
+				evicted.push_back(m_image_pool.front());
+				m_image_pool.erase(m_image_pool.begin());
+			}
+			PooledImage entry {};
+			entry.format     = image.format;
+			entry.image_type = image.image_type;
+			entry.extent     = image.extent;
+			entry.layers     = image.layers;
+			entry.mip_levels = image.mip_levels;
+			entry.samples    = image.samples;
+			entry.usage      = image.usage;
+			entry.flags      = image.flags;
+			entry.image      = image.image;
+			entry.allocation = image.allocation;
+			entry.size       = size;
+			m_image_pool.push_back(entry);
+			m_image_pool_bytes += size;
+			pooled = true;
+		}
+	}
+	for (const auto& e: evicted) {
+		vmaDestroyImage(allocator, e.image, e.allocation);
+	}
+	if (!pooled) {
+		vmaDestroyImage(allocator, image.image, image.allocation);
+	}
 	image.image      = nullptr;
 	image.allocation = nullptr;
+	image.poolable   = false;
 }
 
 } // namespace Libs::Graphics
