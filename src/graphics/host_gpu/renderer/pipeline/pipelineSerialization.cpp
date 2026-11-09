@@ -8,6 +8,7 @@
 #include "graphics/shader/recompiler/ir/Serialize.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <fmt/format.h>
@@ -175,7 +176,23 @@ void PipelineCache::WarmUp(const std::filesystem::path& path) {
 			});
 		}
 	}
-	Common::ParallelFor(jobs.size(), [&](size_t i) { jobs[i](); });
+	// Progress in 10% steps: a large store takes long enough that the window looks frozen.
+	std::atomic<size_t> done {0};
+	std::atomic<size_t> reported {0};
+	const size_t        total = jobs.size();
+	Common::ParallelFor(total, [&](size_t i) {
+		jobs[i]();
+		const size_t finished = ++done;
+		const size_t step     = total >= 10 ? finished * 10 / total : 0;
+		size_t       last     = reported.load();
+		while (step > last && !reported.compare_exchange_weak(last, step)) {
+		}
+		if (step > last) {
+			Log::WriteToConsoleAndLog(
+			    fmt::format("Shader cache: building pipelines {}% ({}/{})\n", step * 10, finished,
+			                total));
+		}
+	});
 	// A key with a stage missing from the store keeps no pipeline.
 	std::erase_if(m_graphics_pipelines,
 	              [](const auto& entry) { return entry.second.pipeline == nullptr; });
