@@ -461,7 +461,6 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	}
 	if (own_chain && view_levels == 1) {
 		// Fallback (fork experiment): a view past MAX_MIP is its own one-level chain.
-		LOGF("[mip view fallback] own chain at mip %u\n", base_level);
 		info       = std::move(physical);
 		base_level = 0;
 		return true;
