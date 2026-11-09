@@ -547,6 +547,18 @@ void CommandProcessor::SuspendPm4() {
 	g_current_execution->m_suspended = true;
 }
 
+// "CP op 0xNN" for profiler zones; the names live as long as the process.
+static const char* CpOpcodeZoneName(uint32_t opcode) {
+	static const auto names = [] {
+		std::array<std::array<char, 16>, 256> table {};
+		for (uint32_t i = 0; i < table.size(); i++) {
+			std::snprintf(table[i].data(), table[i].size(), "CP op 0x%02x", i);
+		}
+		return table;
+	}();
+	return names[opcode & 0xffu].data();
+}
+
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	const bool debug_dump = graphics_debug_dump_enabled();
 	while (!execution.m_buffer_stack.empty()) {
@@ -604,6 +616,9 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", offset, packet_header);
 		}
 
+		// One profiler zone per opcode, so the time CommandProcessor::Process spends in its own
+		// packet handlers shows up by kind instead of as one block.
+		ZoneTransientN(cp_opcode_zone, CpOpcodeZoneName(opcode), tracy::ProfilerAvailable());
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);
