@@ -704,8 +704,14 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 			case 's': {
 				const size_t limit = (flags & FLAGS_PRECISION) != 0u ? precision : maxlen;
 				const char* p = VaArg_ptr<const char>(va_list);
+				bool        is_wide = (flags & FLAGS_LONG) != 0u;
+				// Like libc, print "(null)" for a null or obviously invalid (unmapped low page) pointer.
+				if (reinterpret_cast<uintptr_t>(p) < 0x10000u) {
+					p       = "(null)";
+					is_wide = false;
+				}
 				std::string converted;
-				if ((flags & FLAGS_LONG) != 0u) {
+				if (is_wide) {
 					// The guest ABI uses a 16-bit code unit for wchar_t.
 					const auto* wide = reinterpret_cast<const char16_t*>(p);
 					std::u16string_view text(wide, _strnlen_s(wide, limit));
@@ -717,7 +723,7 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 					p = converted.c_str();
 				}
 				size_t length = _strnlen_s(p, limit);
-				if ((flags & FLAGS_LONG) != 0u && length < converted.size()) {
+				if (is_wide && length < converted.size()) {
 					// A wide-string precision cannot split a multibyte character.
 					while (length != 0 && (static_cast<uint8_t>(p[length]) & 0xc0) == 0x80) {
 						--length;
