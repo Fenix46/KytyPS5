@@ -488,6 +488,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	m_critical_gc_memory = t.critical;
 	m_initial_budget     = budget;
 	m_smoothed_budget    = budget;
+	m_applied_budget     = budget;
 }
 
 BufferCache::~BufferCache() {
@@ -943,14 +944,11 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::UpdateGcThresholds() {
-	const auto sample = m_graphics.GetTotalMemoryBudget();
-	// EWMA: alpha ~0.05 → time constant ~1 s at 60 fps; reacts before a shrinking budget piles up.
-	m_smoothed_budget = static_cast<uint64_t>(0.05 * static_cast<double>(sample) +
-	                                           0.95 * static_cast<double>(m_smoothed_budget));
-	// Upper clamp: never above the startup budget (physical memory does not grow). Floor: never
-	// below 512 MiB so a collapsing budget does not pin the GC on with a trigger near zero.
-	const auto b = std::min<uint64_t>(m_smoothed_budget, m_initial_budget);
-	const auto t = GraphicContext::ComputeGcThresholds(std::max<uint64_t>(b, 512ull * 1024 * 1024));
+	if (!GraphicContext::AdaptGcBudget(m_graphics.GetTotalMemoryBudget(), m_initial_budget,
+	                                   m_smoothed_budget, m_applied_budget)) {
+		return;
+	}
+	const auto t         = GraphicContext::ComputeGcThresholds(m_applied_budget);
 	m_trigger_gc_memory  = t.pressure;
 	m_critical_gc_memory = t.critical;
 }

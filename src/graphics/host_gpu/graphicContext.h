@@ -124,10 +124,15 @@ struct GraphicContext {
 	// the budget, no VMA calls; both caches recompute these on a smoothed budget so they track a
 	// shrinking driver budget instead of being pinned to the startup snapshot.
 	struct GcThresholds {
-		uint64_t pressure = 0; // = max(budget*75%, budget-4GiB)
-		uint64_t critical = 0; // = max(budget*88%, budget-2GiB)
+		uint64_t pressure = 0; // 90% of the budget.
+		uint64_t critical = 0; // 97% of the budget.
 	};
 	[[nodiscard]] static GcThresholds ComputeGcThresholds(uint64_t budget);
+	// Smooths a budget sample into `smoothed` and returns whether `applied`, the budget the levels
+	// are computed from, changed: only when the smoothed budget (never above `initial`) has moved
+	// more than 5% away from it.
+	[[nodiscard]] static bool AdaptGcBudget(uint64_t sample, uint64_t initial, uint64_t& smoothed,
+	                                        uint64_t& applied);
 	// Fixed physical capacity of the device-local (or, on integrated, all) heaps. Unlike the live
 	// VMA budget this never changes, so the overlay can show a stable reference beside it.
 	[[nodiscard]] uint64_t GetDeviceLocalMemoryCapacity() const {

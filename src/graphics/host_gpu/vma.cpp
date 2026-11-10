@@ -150,12 +150,28 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 }
 
 GraphicContext::GcThresholds GraphicContext::ComputeGcThresholds(uint64_t budget) {
-	constexpr int64_t GiB = 1024ll * 1024 * 1024;
-	const auto       b    = static_cast<int64_t>(std::min<uint64_t>(budget, INT64_MAX));
-	return {
-	    static_cast<uint64_t>(std::max<int64_t>(b * 75 / 100, b - 4 * GiB)),
-	    static_cast<uint64_t>(std::max<int64_t>(b * 88 / 100, b - 2 * GiB)),
-	};
+	// GetTotalMemoryBudget already keeps a reserve below the driver's budget. With 75% / 88% of
+	// that on top, the pressure level of an 8 GiB card (4.8 GiB) sat on the game's working set while
+	// 2 GiB of budget were free: crossing it copied 2.5 GiB of GPU-written images back in 10 s, all
+	// of them uploaded again right after (6.6 fps).
+	return {budget / 100 * 90, budget / 100 * 97};
+}
+
+bool GraphicContext::AdaptGcBudget(uint64_t sample, uint64_t initial, uint64_t& smoothed,
+                                   uint64_t& applied) {
+	constexpr uint64_t MIN_BUDGET = 512ull * 1024 * 1024;
+	// About one second at 60 collections per second.
+	smoothed = static_cast<uint64_t>(0.05 * static_cast<double>(sample) +
+	                                 0.95 * static_cast<double>(smoothed));
+	const auto target = std::max(std::min(smoothed, initial), MIN_BUDGET);
+	const auto change = target > applied ? target - applied : applied - target;
+	// The driver's budget wobbles by a percent or two all the time; following that moved the levels
+	// across the memory in use. Only a lasting change of more than 5% moves them.
+	if (change <= applied / 20) {
+		return false;
+	}
+	applied = target;
+	return true;
 }
 
 // Images freed by the texture cache are kept and handed back to identical requests: creating and

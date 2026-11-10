@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
+#include "graphics/host_gpu/spinBackoff.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -51,14 +52,12 @@ constexpr uint64_t REGION_PAGES = REGION_SIZE / PAGE_SIZE;
 class SpinGuard final {
 public:
 	explicit SpinGuard(std::atomic_flag& lock): m_lock(lock) {
+		SpinBackoff backoff;
 		while (m_lock.test_and_set(std::memory_order_acquire)) {
-#if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
-#elif defined(_M_ARM64)
-			__yield();
-#elif defined(__aarch64__)
-			asm volatile("yield");
-#endif
+			// Wait on reads, so the holder's cache line is not written until the lock is free.
+			while (m_lock.test(std::memory_order_relaxed)) {
+				backoff.Wait();
+			}
 		}
 	}
 	~SpinGuard() { m_lock.clear(std::memory_order_release); }

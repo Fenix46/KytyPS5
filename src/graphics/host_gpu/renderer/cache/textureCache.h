@@ -220,6 +220,7 @@ private:
 	// shrinking driver budget still triggers collection early enough to avoid a massive flush.
 	uint64_t m_smoothed_budget = 0;
 	uint64_t m_initial_budget   = 0;
+	uint64_t m_applied_budget   = 0; // The budget the levels were last computed from.
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;
