@@ -278,6 +278,22 @@ bool BufferCache::CoveredByReadbacks(std::span<const vk::BufferCopy> copies,
 	return true;
 }
 
+bool BufferCache::ReadbacksHold(uint64_t start, uint64_t end) {
+	if (start >= end) {
+		return false;
+	}
+	std::lock_guard lock(m_readback_mutex);
+	bool            any  = false;
+	bool            held = true;
+	m_gpu_modified_ranges.ForEachInRange(start, end - start, [&](uint64_t first, uint64_t last) {
+		any = true;
+		held = held && std::ranges::any_of(m_readbacks, [&](const PendingReadback& entry) {
+			return !entry.stale && entry.start <= first && last <= entry.end;
+		});
+	});
+	return any && held;
+}
+
 void BufferCache::MarkReadbacksStale(uint64_t vaddr, uint64_t size) {
 	std::lock_guard lock(m_readback_mutex);
 	for (auto& entry: m_readbacks) {
@@ -573,10 +589,25 @@ void BufferCache::CompleteReadMemory(uint64_t vaddr, uint64_t size, bool is_writ
 					m_hot_pages.push_back(page);
 				}
 			}
-			const auto start =
-			    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
-			const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
-			                          buffer.CpuAddress() + buffer.Size());
+			auto start = std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
+			auto end   = std::min(std::max(start + DownloadWindowSize, vaddr + size),
+			                      buffer.CpuAddress() + buffer.Size());
+			if (!is_write) {
+				// The copies recorded behind the writing dispatch hold the hot pages only. When they
+				// hold the pages of this read, it takes just those and waits for that copy alone; the
+				// rest of the window stays GPU-written until it is read. With the whole window, bytes
+				// next to the page (Astro: a 16 MiB array ending at an 8-byte count the game reads
+				// every frame) made every such read a fresh download behind all queued work, 25-37 ms.
+				// As Erlou93/KytyPS5-Yotei b2b55c92 (BufferCache::ReadRange), GPL-2.0.
+				const auto page_start =
+				    std::max(Common::AlignDown(vaddr, uint64_t {0x1000}), buffer.CpuAddress());
+				const auto page_end = std::min(Common::AlignUp(vaddr + size, uint64_t {0x1000}),
+				                               buffer.CpuAddress() + buffer.Size());
+				if (ReadbacksHold(page_start, page_end)) {
+					start = page_start;
+					end   = page_end;
+				}
+			}
 			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 			}

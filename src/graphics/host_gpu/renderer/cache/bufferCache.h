@@ -175,6 +175,8 @@ private:
 	// Command thread: the rest of ReadMemory, downloading whatever is still only on the GPU.
 	void CompleteReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool from_guest);
 	void               MarkReadbacksStale(uint64_t vaddr, uint64_t size);
+	// Whether the range has GPU-written bytes and recorded copies hold every one of them.
+	[[nodiscard]] bool ReadbacksHold(uint64_t start, uint64_t end);
 
 	std::mutex                   m_readback_mutex;
 	std::vector<PendingReadback> m_readbacks;
