@@ -149,6 +149,15 @@ uint64_t GraphicContext::GetTotalMemoryBudget() const {
 	return std::max(local, available > system_reserve ? available - system_reserve : uint64_t {0});
 }
 
+GraphicContext::GcThresholds GraphicContext::ComputeGcThresholds(uint64_t budget) {
+	constexpr int64_t GiB = 1024ll * 1024 * 1024;
+	const auto       b    = static_cast<int64_t>(std::min<uint64_t>(budget, INT64_MAX));
+	return {
+	    static_cast<uint64_t>(std::max<int64_t>(b * 75 / 100, b - 4 * GiB)),
+	    static_cast<uint64_t>(std::max<int64_t>(b * 88 / 100, b - 2 * GiB)),
+	};
+}
+
 // Images freed by the texture cache are kept and handed back to identical requests: creating and
 // destroying device memory dominates the time spent loading levels.
 static constexpr size_t   IMAGE_POOL_MAX_ENTRIES = 64;

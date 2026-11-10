@@ -120,6 +120,30 @@ struct GraphicContext {
 	}
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
+	// Pressure/critical GC thresholds shared by the buffer and texture caches. Pure function of
+	// the budget, no VMA calls; both caches recompute these on a smoothed budget so they track a
+	// shrinking driver budget instead of being pinned to the startup snapshot.
+	struct GcThresholds {
+		uint64_t pressure = 0; // = max(budget*75%, budget-4GiB)
+		uint64_t critical = 0; // = max(budget*88%, budget-2GiB)
+	};
+	[[nodiscard]] static GcThresholds ComputeGcThresholds(uint64_t budget);
+	// Fixed physical capacity of the device-local (or, on integrated, all) heaps. Unlike the live
+	// VMA budget this never changes, so the overlay can show a stable reference beside it.
+	[[nodiscard]] uint64_t GetDeviceLocalMemoryCapacity() const {
+		const bool discrete =
+		    physical_device_properties.deviceType == vk::PhysicalDeviceType::eDiscreteGpu;
+		uint64_t cap = 0;
+		for (uint32_t i = 0; i < physical_device_memory_properties.memoryHeapCount; i++) {
+			const bool device_local = static_cast<bool>(
+			    physical_device_memory_properties.memoryHeaps[i].flags &
+			    vk::MemoryHeapFlagBits::eDeviceLocal);
+			if (!discrete || device_local) {
+				cap += physical_device_memory_properties.memoryHeaps[i].size;
+			}
+		}
+		return cap;
+	}
 
 	struct HeapUsage {
 		uint64_t usage        = 0; // Whole process, as reported by VK_EXT_memory_budget.

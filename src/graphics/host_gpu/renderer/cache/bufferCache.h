@@ -113,6 +113,10 @@ private:
 
 	bool IsBufferInvalid(BufferId id) const { return !id || m_slot_buffers[id].is_deleted; }
 
+	// Recomputes m_trigger_gc_memory / m_critical_gc_memory from a smoothed budget so they track a
+	// shrinking driver budget instead of staying pinned to the startup snapshot.
+	void UpdateGcThresholds();
+
 	using BufferMap = std::map<uint64_t, BufferId>;
 	struct OverlapResult {
 		BufferMap::iterator first;
@@ -203,6 +207,10 @@ private:
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
 	uint64_t m_registered_bytes   = 0;
+	// Adaptive GC: thresholds track a smoothed budget instead of the startup snapshot, so a
+	// shrinking driver budget still triggers collection early enough to avoid a massive flush.
+	uint64_t m_smoothed_budget = 0;
+	uint64_t m_initial_budget   = 0;
 };
 
 } // namespace Libs::Graphics

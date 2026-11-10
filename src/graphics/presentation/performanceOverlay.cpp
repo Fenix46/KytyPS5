@@ -134,7 +134,8 @@ struct Snapshot {
 	uint64_t                            pipeline_create_peak_ns = 0;
 	Common::HostStats                   host;
 	std::optional<uint64_t>             device_memory;
-	uint64_t                            device_budget = 0;
+	uint64_t                            device_budget  = 0;
+	uint64_t                            device_capacity = 0;
 	std::array<GraphicContext::HeapUsage, VK_MAX_MEMORY_HEAPS> heaps {};
 	uint32_t                                                   heap_count = 0;
 	std::array<float, FRAME_HISTORY>                           history {};
@@ -499,6 +500,7 @@ void Refresh(Snapshot& shown, const GraphicContext& graphics, Clock::time_point 
 			shown.device_budget += heap.budget;
 		}
 	}
+	shown.device_capacity = graphics.GetDeviceLocalMemoryCapacity();
 	if (g_details.load(std::memory_order_acquire)) {
 		shown.guest_memory = LibKernel::Memory::GetDebugStats();
 	}
@@ -519,7 +521,7 @@ void DrawCompact(const Snapshot& shown) {
 	GpuActivityRows(shown);
 	CompilationRows(shown);
 	if (shown.device_memory) {
-		Row("GPU memory", Bytes(*shown.device_memory) + " / " + Bytes(shown.device_budget));
+		Row("GPU memory", Bytes(*shown.device_memory) + " / " + Bytes(shown.device_capacity));
 	}
 	TransferRow(shown, "Texture transfers", Counter::TextureUploadBytes,
 	            Counter::TextureDownloadBytes);
@@ -658,6 +660,15 @@ void DrawGpu(const Snapshot& shown, const GraphicContext& graphics) {
 			                         : 0.0;
 			Row("Vulkan budget", Bytes(*shown.device_memory) + " / " + Bytes(shown.device_budget),
 			    LevelColor(share, 80, 95));
+		}
+		if (shown.device_capacity > 0 && shown.device_memory) {
+			const double cap_share = static_cast<double>(*shown.device_memory) /
+			                         static_cast<double>(shown.device_capacity) * 100.0;
+			Row("VRAM capacity",
+			    Bytes(*shown.device_memory) + " / " + Bytes(shown.device_capacity),
+			    LevelColor(cap_share, 80, 95));
+		} else if (shown.device_capacity > 0) {
+			Row("VRAM capacity", Bytes(shown.device_capacity));
 		}
 		for (size_t heap = 0; heap < shown.heap_count; heap++) {
 			const auto& usage = shown.heaps[heap];

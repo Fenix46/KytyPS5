@@ -482,13 +482,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	}
 	// The collector compares these with the whole process's device memory, most of which it cannot
 	// free: with the levels a few GiB below the budget it worked all the time on an 8 GiB card.
-	constexpr int64_t GiB = 1024ll * 1024 * 1024;
-	const auto        budget =
-	    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
-	m_trigger_gc_memory =
-	    static_cast<uint64_t>(std::max<int64_t>(budget * 75 / 100, budget - 4 * GiB));
-	m_critical_gc_memory =
-	    static_cast<uint64_t>(std::max<int64_t>(budget * 88 / 100, budget - 2 * GiB));
+	const auto budget = m_graphics.GetTotalMemoryBudget();
+	const auto t      = GraphicContext::ComputeGcThresholds(budget);
+	m_trigger_gc_memory  = t.pressure;
+	m_critical_gc_memory = t.critical;
+	m_initial_budget     = budget;
+	m_smoothed_budget    = budget;
 }
 
 BufferCache::~BufferCache() {
@@ -943,11 +942,25 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionCpuModified(vaddr, size);
 }
 
+void BufferCache::UpdateGcThresholds() {
+	const auto sample = m_graphics.GetTotalMemoryBudget();
+	// EWMA: alpha ~0.05 → time constant ~1 s at 60 fps; reacts before a shrinking budget piles up.
+	m_smoothed_budget = static_cast<uint64_t>(0.05 * static_cast<double>(sample) +
+	                                           0.95 * static_cast<double>(m_smoothed_budget));
+	// Upper clamp: never above the startup budget (physical memory does not grow). Floor: never
+	// below 512 MiB so a collapsing budget does not pin the GC on with a trigger near zero.
+	const auto b = std::min<uint64_t>(m_smoothed_budget, m_initial_budget);
+	const auto t = GraphicContext::ComputeGcThresholds(std::max<uint64_t>(b, 512ull * 1024 * 1024));
+	m_trigger_gc_memory  = t.pressure;
+	m_critical_gc_memory = t.critical;
+}
+
 void BufferCache::RunGarbageCollector() {
 	const auto last_tick = m_gc_tick;
 	const auto tick      = m_gc_tick = std::max(m_gc_tick + 1, GraphicContext::CacheTick());
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+		UpdateGcThresholds();
 	}
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;

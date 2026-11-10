@@ -150,6 +150,10 @@ private:
 	                                      bool exact_format);
 	[[nodiscard]] static BindingType UploadBinding(const Image& image);
 
+	// Recomputes the GC thresholds from a smoothed budget so they track a shrinking driver budget
+	// instead of staying pinned to the startup snapshot.
+	void UpdateGcThresholds();
+
 	// Caller holds m_lock; it also serializes Image::picked.
 	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size) const;
 	[[nodiscard]] OverlapResult ResolveOverlap(const ImageInfo& requested, BindingType binding,
@@ -212,6 +216,10 @@ private:
 	bool     m_readback_linear_images  = false;
 	bool     m_readback_tiled_images   = false;
 	bool     m_readback_storage_images = false;
+	// Adaptive GC: thresholds track a smoothed budget instead of the startup snapshot, so a
+	// shrinking driver budget still triggers collection early enough to avoid a massive flush.
+	uint64_t m_smoothed_budget = 0;
+	uint64_t m_initial_budget   = 0;
 
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;

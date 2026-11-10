@@ -451,10 +451,13 @@ void RenderContext::LogDebugStats() {
 	            static_cast<unsigned long long>(textures.pinned_images),
 	            mb(textures.pinned_bytes));
 	std::printf(" | gc sees %.0f MB; texture gc trigger/pressure/critical=%.0f/%.0f/%.0f MB; "
-	            "buffer gc trigger/critical=%.0f/%.0f MB; image pool=%.0f MB\n",
+	            "buffer gc trigger/critical=%.0f/%.0f MB; image pool=%.0f MB | vram capacity=%.0f MB, "
+	            "budget=%.0f MB\n",
 	            mb(textures.used), mb(textures.trigger), mb(textures.pressure),
 	            mb(textures.critical), mb(buffers.trigger), mb(buffers.critical),
-	            mb(m_graphics.ImagePoolBytes()));
+	            mb(m_graphics.ImagePoolBytes()),
+	            mb(m_graphics.GetDeviceLocalMemoryCapacity()),
+	            mb(m_graphics.GetTotalMemoryBudget()));
 	std::fflush(stdout);
 	window      = now;
 	frames      = 0;
