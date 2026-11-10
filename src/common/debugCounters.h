@@ -38,6 +38,8 @@ enum class Counter {
 	CompletionWaitNs,     // The completion thread waiting for its next tick (idle time).
 	RenderPasses,
 	RenderPassPixels, // Sum of the render areas: tells a resolution change from a slower GPU.
+	RenderPassesLarge, // Passes of 7 MP and more (4K class) ...
+	RenderPassLargePixels, // ... and the sum of their areas.
 	TextureReuploads, // Uploads of an image that already had its data once.
 	TextureReuploadBytes,
 	TexturesCreated,

@@ -1328,6 +1328,8 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	     buffer_index_start, buffer_num, set_index, attribute->pixel_format, attribute->tiling_mode,
 	     attribute->aspect_ratio, attribute->width, attribute->height, attribute->pitch_in_pixel,
 	     attribute->option, category);
+	std::printf("[videoout] guest registers %d display buffers of %ux%u\n", buffer_num,
+	            attribute->width, attribute->height);
 
 	if (option != nullptr) {
 		return VIDEO_OUT_ERROR_INVALID_OPTION;
@@ -1715,7 +1717,15 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	status->reserved[0] = 0;
 	status->reserved[1] = 0;
 	status->reserved[2] = 0;
+	const auto reported = status->resolution;
 	ctx->mutex.Unlock();
+	static std::atomic_bool logged {false};
+	if (!logged.exchange(true, std::memory_order_relaxed)) {
+		std::printf("[videoout] output status: resolution=%u (1: 1080p, 2: 4K), window %ux%u, "
+		            "ATTRIBUTE3=0x%x\n",
+		            static_cast<unsigned>(reported), static_cast<unsigned>(driver.width),
+		            static_cast<unsigned>(driver.height), static_cast<unsigned>(attribute3));
+	}
 
 	return OK;
 }

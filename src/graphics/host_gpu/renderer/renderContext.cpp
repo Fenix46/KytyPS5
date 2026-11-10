@@ -423,6 +423,12 @@ void RenderContext::LogDebugStats() {
 	                : 0.0,
 	            static_cast<unsigned long long>(max_extent >> 32u),
 	            static_cast<unsigned long long>(max_extent & 0xffffffffu));
+	std::printf("[stats] render passes of 7 MP and more=%llu, %.0f%% of the rendered area\n",
+	            n(Counter::RenderPassesLarge),
+	            delta[static_cast<int>(Counter::RenderPassPixels)] != 0
+	                ? static_cast<double>(delta[static_cast<int>(Counter::RenderPassLargePixels)]) *
+	                      100.0 / static_cast<double>(delta[static_cast<int>(Counter::RenderPassPixels)])
+	                : 0.0);
 	const auto textures = m_texture_cache.GetDebugStats();
 	const auto buffers  = m_buffer_cache.GetDebugStats();
 	std::printf("[stats] textures: %llu images %.0f MB, evicted=%llu, up=%.1f MB, down=%.1f MB | "

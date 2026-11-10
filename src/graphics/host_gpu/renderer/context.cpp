@@ -85,6 +85,11 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::RenderPasses);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::RenderPassPixels,
 		                           uint64_t {state.width} * state.height);
+		if (uint64_t {state.width} * state.height >= 7'000'000u) {
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::RenderPassesLarge);
+			Common::DebugCounters::Add(Common::DebugCounters::Counter::RenderPassLargePixels,
+			                           uint64_t {state.width} * state.height);
+		}
 		const auto extent = (uint64_t {state.width} << 32u) | state.height;
 		const auto best   = Common::DebugCounters::g_max_render_extent.load(std::memory_order_relaxed);
 		if (uint64_t {state.width} * state.height > (best >> 32u) * (best & 0xffffffffu)) {
