@@ -239,7 +239,11 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_operations.pop();
 			m_priority_active_tick = operation.tick;
 		}
-		m_master.Wait(operation.tick);
+		{
+			Common::DebugCounters::ScopedTimer idle(
+			    Common::DebugCounters::Counter::CompletionWaitNs);
+			m_master.Wait(operation.tick);
+		}
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));
 		}

@@ -21,6 +21,27 @@ enum class Counter {
 	GpuWaits, // CPU blocked on a GPU timeline semaphore.
 	GpuWaitNs,
 	GpuFaults, // Guest writes to GPU-tracked memory.
+	GpuFaultNs, // Time spent inside the fault handler (invalidate, wait for write-backs).
+	GpuThreadFaults,  // Subset of GpuFaults taken by the GPU command thread itself.
+	GpuThreadFaultNs, // Their handler time: it stalls command processing directly.
+	GpuThreadWaits,   // Subset of GpuWaits blocking the GPU command thread.
+	GpuThreadWaitNs,
+	ReadbackRecorded,    // Guest access to GPU-written bytes: a new copy was recorded for it.
+	ReadbackReused,      // ... a copy recorded earlier already covered it.
+	ReadbackServed,      // ... and the access completed from that copy without stalling commands.
+	ReadbackStalled,     // ... or the command thread had to wait for a fresh download.
+	ReadbackGpuThread,   // Read-backs needed by the command thread itself.
+	GuestReadbackWaitNs,  // Guest threads waiting for a buffer copy they asked for.
+	GuestReadbackTripNs,  // ... and waiting for the command thread to take their requests.
+	WriteBackWaits,       // Guest threads waiting for image write-backs.
+	WriteBackWaitNs,
+	CompletionWaitNs,     // The completion thread waiting for its next tick (idle time).
+	RenderPasses,
+	RenderPassPixels, // Sum of the render areas: tells a resolution change from a slower GPU.
+	TextureReuploads, // Uploads of an image that already had its data once.
+	TextureReuploadBytes,
+	TexturesCreated,
+	TextureCreateBytes,
 	ShadersCompiled,
 	ShaderCompileNs,
 	PipelinesCreated,
@@ -56,6 +77,14 @@ enum class Counter {
 };
 
 enum class Peak { ShaderCompileNs, PipelineCreateNs, Count };
+
+// Diagnostics: page whose GPU writers are being traced (set by the first slow read-back fault).
+inline std::atomic<uint64_t> g_watch_page {0};
+// Diagnostics: context of the access violation being handled on this thread.
+inline thread_local uint64_t g_fault_rip = 0;
+inline thread_local uint64_t g_fault_rsp = 0;
+// Diagnostics: largest render area begun since the last report, as width << 32 | height.
+inline std::atomic<uint64_t> g_max_render_extent {0};
 
 namespace Detail {
 inline std::atomic<bool>     g_enabled {false};

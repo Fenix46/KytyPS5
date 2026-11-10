@@ -112,7 +112,8 @@ public:
 	[[nodiscard]] std::pair<uint8_t*, uint64_t> Map(uint64_t size, uint64_t alignment = 0,
 	                                                bool allow_wait = true);
 	void                                        Commit();
-	[[nodiscard]] Download                      MapDownload(uint64_t size, uint64_t alignment);
+	[[nodiscard]] Download                      MapDownload(uint64_t size, uint64_t alignment,
+	                                                         bool allow_wait = true);
 	[[nodiscard]] uint64_t Copy(const void* source, uint64_t size, uint64_t alignment = 0);
 
 private:

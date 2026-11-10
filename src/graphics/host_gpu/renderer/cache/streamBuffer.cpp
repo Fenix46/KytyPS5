@@ -283,8 +283,10 @@ void StreamBuffer::Commit() {
 	watch.tick        = tick;
 }
 
-StreamBuffer::Download StreamBuffer::MapDownload(uint64_t size, uint64_t alignment) {
-	if (const auto [mapped, offset] = Map(size, alignment); mapped != nullptr) {
+StreamBuffer::Download StreamBuffer::MapDownload(uint64_t size, uint64_t alignment,
+                                                 bool allow_wait) {
+	// Without waiting, a ring still in use by the GPU falls back to a one-off buffer.
+	if (const auto [mapped, offset] = Map(size, alignment, allow_wait); mapped != nullptr) {
 		Commit();
 		return {this, mapped, offset, nullptr};
 	}

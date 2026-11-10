@@ -88,6 +88,9 @@ int GuestSignalDispatchSignal() {
 static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception) noexcept {
 	auto* exception_record = exception->ExceptionRecord;
 
+	if (t_guarded_probe) {
+		return EXCEPTION_CONTINUE_SEARCH;
+	}
 	if (exception_record->ExceptionCode == 0x406D1388) {
 		// 0x406D1388 only names the thread for an attached debugger.
 		return EXCEPTION_CONTINUE_EXECUTION;

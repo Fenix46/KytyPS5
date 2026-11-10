@@ -39,6 +39,10 @@ using Handler = bool (*)(const ExceptionInfo&);
 
 bool InstallHandler(Handler handler);
 
+// Set by a host diagnostic that probes memory it cannot validate (stack unwinding of another
+// thread) and guards the probe itself: faults on this thread then skip the emulator's handler.
+inline thread_local bool t_guarded_probe = false;
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 bool InitializeThreadSignalStack();
 // The host signal that delivers guest signals. Fault handling blocks it, so a guest handler runs

@@ -88,6 +88,18 @@ public:
 	[[nodiscard]] uint64_t WriteBackTick(uint64_t address, uint64_t size);
 	void RunGarbageCollector();
 
+	// Diagnostics: what the collector sees and what the cache itself holds.
+	struct DebugStats {
+		uint64_t used = 0, trigger = 0, pressure = 0, critical = 0;
+		uint64_t registered_bytes = 0, registered_images = 0;
+		uint64_t pinned_images = 0, pinned_bytes = 0;
+	};
+	[[nodiscard]] DebugStats GetDebugStats() const noexcept {
+		return {m_total_used_memory, m_trigger_gc_memory, m_pressure_gc_memory,
+		        m_critical_gc_memory, m_registered_bytes,   m_registered_images,
+		        m_gc_pinned_images,   m_gc_pinned_bytes};
+	}
+
 private:
 	struct MetaDataInfo {
 		// PS5 DB_DEPTH_VIEW encodes 13-bit base and last array-slice indices.
@@ -193,6 +205,10 @@ private:
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
 	uint64_t m_critical_gc_memory      = 3ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick                 = 0;
+	uint64_t m_registered_bytes        = 0;
+	uint64_t m_gc_pinned_images        = 0; // Idle images the last collection kept for a heap.
+	uint64_t m_gc_pinned_bytes         = 0;
+	uint64_t m_registered_images       = 0;
 	bool     m_readback_linear_images  = false;
 	bool     m_readback_tiled_images   = false;
 	bool     m_readback_storage_images = false;

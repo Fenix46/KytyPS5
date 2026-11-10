@@ -43,6 +43,8 @@ public:
 	[[nodiscard]] int GetFrameNum() const;
 
 	[[nodiscard]] static bool IsGpuThread() noexcept;
+	// PM4 opcode the command thread is executing (0xFFFFFFFF outside a packet); diagnostics only.
+	[[nodiscard]] static uint32_t CurrentPm4Opcode() noexcept;
 
 private:
 	static constexpr uint32_t ComputePipeCount     = 7;

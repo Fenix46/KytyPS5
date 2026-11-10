@@ -1,3 +1,4 @@
+#include "common/debugCounters.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/profiler.h"
@@ -80,6 +81,16 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
 	Handle().beginRendering(rendering);
+	if (Common::DebugCounters::Enabled() && state.width <= 16384 && state.height <= 16384) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::RenderPasses);
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::RenderPassPixels,
+		                           uint64_t {state.width} * state.height);
+		const auto extent = (uint64_t {state.width} << 32u) | state.height;
+		const auto best   = Common::DebugCounters::g_max_render_extent.load(std::memory_order_relaxed);
+		if (uint64_t {state.width} * state.height > (best >> 32u) * (best & 0xffffffffu)) {
+			Common::DebugCounters::g_max_render_extent.store(extent, std::memory_order_relaxed);
+		}
+	}
 	m_render_state = state;
 	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state.depth_stencil_attachment.depth_clear   = false;

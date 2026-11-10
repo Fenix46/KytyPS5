@@ -110,6 +110,8 @@ uint32_t GraphicContext::GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> 
 		heaps[heap] = {.usage        = budgets[heap].usage,
 		               .budget       = budgets[heap].budget,
 		               .allocations  = budgets[heap].statistics.allocationCount,
+		               .allocation_bytes = budgets[heap].statistics.allocationBytes,
+		               .block_bytes      = budgets[heap].statistics.blockBytes,
 		               .device_local = static_cast<bool>(properties.flags &
 		                                                 vk::MemoryHeapFlagBits::eDeviceLocal)};
 	}

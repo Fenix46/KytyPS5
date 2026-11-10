@@ -93,6 +93,21 @@ public:
 	[[nodiscard]] RangeSet TakeBdaSync();
 	void               RunGarbageCollector();
 
+	// Right after a compute dispatch: copies the GPU-written bytes of pages the guest was seen to
+	// read back into host memory behind it, so that read waits only for that copy instead of
+	// everything queued since. Asks for a submit through TakeFlushRequest().
+	void               SpeculativeReadback();
+	[[nodiscard]] bool TakeFlushRequest() noexcept { return std::exchange(m_flush_requested, false); }
+
+	// Diagnostics: what the collector sees and what the cache itself holds.
+	struct DebugStats {
+		uint64_t used = 0, trigger = 0, critical = 0, registered_bytes = 0, registered_buffers = 0;
+	};
+	[[nodiscard]] DebugStats GetDebugStats() const {
+		return {m_total_used_memory, m_trigger_gc_memory, m_critical_gc_memory, m_registered_bytes,
+		        m_buffers.size()};
+	}
+
 private:
 	friend struct BufferCacheTestAccess;
 
@@ -129,6 +144,40 @@ private:
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 
+	// A host copy of GPU-written bytes recorded behind a dispatch. Valid until the GPU writes the
+	// bytes again; the bytes stay GPU-modified until a guest access consumes the copy.
+	struct PendingReadback {
+		uint64_t batch;
+		uint64_t start;
+		uint64_t end;
+		uint64_t tick;
+		bool     done;
+		bool     stale;
+	};
+	[[nodiscard]] bool CoveredByReadbacks(std::span<const vk::BufferCopy> copies,
+	                                      uint64_t buffer_address, uint64_t& wait_tick);
+	struct ReadbackPiece {
+		uint64_t start;
+		uint64_t end;
+	};
+	// Records one copy per owning buffer of the pieces into host memory, publishes it from the
+	// completion thread and remembers it in m_readbacks.
+	void RecordReadbacks(std::span<const ReadbackPiece> pieces);
+	// Command thread, for a guest thread about to read or write GPU-written bytes: makes sure a
+	// copy of them is submitted and returns the tick to wait for (0: nothing to wait for, the
+	// bytes are clean or their copy has landed). The caller waits on its own thread, so command
+	// processing goes on meanwhile.
+	[[nodiscard]] uint64_t BeginReadback(uint64_t vaddr, uint64_t size, bool is_write);
+	// Command thread: the rest of ReadMemory, downloading whatever is still only on the GPU.
+	void CompleteReadMemory(uint64_t vaddr, uint64_t size, bool is_write, bool from_guest);
+	void               MarkReadbacksStale(uint64_t vaddr, uint64_t size);
+
+	std::mutex                   m_readback_mutex;
+	std::vector<PendingReadback> m_readbacks;
+	uint64_t                     m_next_readback_batch = 1;
+	std::vector<uint64_t>        m_hot_pages;
+	bool                         m_flush_requested = false;
+
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
 	FaultManager                                      m_fault_manager;
@@ -153,6 +202,7 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	uint64_t m_registered_bytes   = 0;
 };
 
 } // namespace Libs::Graphics

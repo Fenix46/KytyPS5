@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/gpuProfiler.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1214,6 +1215,15 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
+	int           gpu_profile_slot  = -1;
+	if (GpuProfiler::Active()) {
+		const auto vs_hash = state.vertex_info[0].stage.module->info.shader_hash;
+		const auto ps_hash = state.ps_active ? state.ps_input_info.stage.module->info.shader_hash : 0;
+		gpu_profile_slot = GpuProfiler::Begin(
+		    vk_buffer, m_context.GetCommandScheduler(),
+		    vs_hash * 0x9e3779b97f4a7c15ull ^ ps_hash ^ (mesh_active ? 1u : 0u), vs_hash, ps_hash,
+		    mesh_active ? 1u : 0u, mesh_active ? mesh_groups : draw.index_count);
+	}
 	if (mesh_task) {
 		vk_buffer.drawMeshTasksEXT(emit.indirect.count, 1, 1);
 	} else if (mesh_active) {
@@ -1227,6 +1237,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		vk_buffer.drawIndirect(args_buffer.first->Handle(), args_buffer.second,
 		                       emit.indirect.count, emit.indirect.stride);
 	}
+	GpuProfiler::End(vk_buffer, gpu_profile_slot);
 	occlusion_queries.End(vk_buffer, occlusion_query);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
@@ -1330,6 +1341,9 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 		default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
 	}
 	index_source.size = static_cast<uint64_t>(args.index_count) * index_source.guest_element_size;
+	g_draw_debug_context = {index_source.address, index_source.address + index_source.size,
+	                        static_cast<uint32_t>(ucfg.GetPrimType()),
+	                        buffer.GetUserConfig().GetPrimitiveResetControl()};
 	state.primitive_restart_enable = ResolvePrimitiveRestart(buffer, index_source);
 
 	std::vector<uint16_t> expanded_indices;

@@ -27,6 +27,16 @@ class VideoOutDriver;
 
 namespace Libs::Graphics {
 
+// Diagnostics: the guest index range of the draw the command thread is preparing, so a slow
+// fault can say whether it was the index buffer being read back from the GPU.
+struct DrawDebugContext {
+	uint64_t index_begin = 0;
+	uint64_t index_end   = 0;
+	uint32_t prim_type   = 0;
+	uint32_t reset_ctl   = 0;
+};
+inline thread_local DrawDebugContext g_draw_debug_context;
+
 class GuestGpu;
 
 class RenderContext {
@@ -54,12 +64,17 @@ public:
 	OcclusionQueries&   GetOcclusionQueries() { return m_occlusion_queries; }
 
 	[[nodiscard]] bool HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept;
+	// A 4-byte read that needs no GPU wait: only when nothing GPU-written (buffer bytes or image
+	// write-backs) overlaps it. The caller then serves it from the backing store.
+	[[nodiscard]] bool TryReadCleanDword(uint64_t vaddr, uint32_t* value);
 	[[nodiscard]] bool InvalidateMemory(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
 	void               PrepareBda();
 	void               RunGarbageCollector();
+	// Diagnostics: once per frame; prints a "[stats]" summary every 10 s while counters are on.
+	void               LogDebugStats();
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
 	void DeleteInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);

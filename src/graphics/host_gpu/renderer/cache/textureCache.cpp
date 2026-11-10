@@ -18,6 +18,7 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <bit>
 #include <cinttypes>
@@ -130,12 +131,15 @@ TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler
 		constexpr int64_t GiB = 1024ll * 1024 * 1024;
 		const auto        budget =
 		    static_cast<int64_t>(std::min<uint64_t>(m_graphics.GetTotalMemoryBudget(), INT64_MAX));
+		// The collector compares these with the whole process's device memory, most of which it
+		// cannot free: with the pressure level a few GiB below the budget it copied GPU-written
+		// images back and freed them all the time on an 8 GiB card.
 		const auto threshold = std::min<int64_t>(budget, 8 * GiB);
-		m_pressure_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 6 * threshold / 10, budget - GiB), GiB + GiB / 2));
-		m_critical_gc_memory = static_cast<uint64_t>(
-		    std::max<int64_t>(std::min(budget - 2 * threshold / 10, budget - GiB / 2), 3 * GiB));
-		m_trigger_gc_memory = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
+		m_trigger_gc_memory  = static_cast<uint64_t>(std::max<int64_t>((budget - threshold) / 2, 0));
+		m_pressure_gc_memory =
+		    static_cast<uint64_t>(std::max<int64_t>(budget * 75 / 100, budget - 4 * GiB));
+		m_critical_gc_memory =
+		    static_cast<uint64_t>(std::max<int64_t>(budget * 88 / 100, budget - 2 * GiB));
 	}
 }
 
@@ -218,6 +222,11 @@ void TextureCache::RegisterImage(ImageId id) {
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
+	m_registered_bytes += image.AccountedSize();
+	m_registered_images++;
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TexturesCreated);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureCreateBytes,
+	                           image.AccountedSize());
 }
 
 void TextureCache::UnregisterImage(ImageId id) {
@@ -232,6 +241,8 @@ void TextureCache::UnregisterImage(ImageId id) {
 	});
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
+	m_registered_bytes -= image.AccountedSize();
+	m_registered_images--;
 	image.registered = false;
 }
 
@@ -912,6 +923,23 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 	auto& destination = image.depth_id ? m_slot_images[image.depth_id] : image;
 	const auto& info        = image.info;
 	const auto  binding     = image.depth_id ? BindingType::DepthTarget : UploadBinding(image);
+	if (Common::DebugCounters::Enabled() && image.upload_count++ != 0) {
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureReuploads);
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::TextureReuploadBytes,
+		                           info.data.size);
+		// The first images to be uploaded over and over: what they are and where they live.
+		static int reported = 0;
+		if (image.upload_count == 30 && reported < 16) {
+			reported++;
+			std::printf("[reupload] image 0x%016llx+0x%llx %ux%ux%u layers=%u levels=%u "
+			            "guest format=%d binding=%d, 30 uploads\n",
+			            static_cast<unsigned long long>(info.data.address),
+			            static_cast<unsigned long long>(info.data.size), info.extent.width,
+			            info.extent.height, info.extent.depth, info.resources.layers,
+			            info.resources.levels, static_cast<int>(info.guest_format),
+			            static_cast<int>(binding));
+		}
+	}
 	if (binding != BindingType::DepthTarget) {
 		if ((binding == BindingType::RenderTarget || binding == BindingType::VideoOut) &&
 		    (info.resources.layers == 0 || info.data.size % info.resources.layers != 0 ||
@@ -1807,7 +1835,8 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 	}
 	const auto range = image.info.data;
 	auto download = m_buffer_cache.GetUtilityBuffer(MemoryUsage::Download)
-	                    .MapDownload(range.size, std::max<uint64_t>(image.info.bytes_per_block, 4));
+	                    .MapDownload(range.size, std::max<uint64_t>(image.info.bytes_per_block, 4),
+	                                 false);
 	if (!LibKernel::Memory::TryReadBacking(range.address, download.mapped, range.size)) {
 		return false;
 	}
@@ -2024,7 +2053,10 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
-	const uint64_t   tick = m_gc_tick++;
+	const uint64_t   last_tick = m_gc_tick;
+	const uint64_t   tick = m_gc_tick = std::max(m_gc_tick + 1, GraphicContext::CacheTick());
+	m_gc_pinned_images    = 0;
+	m_gc_pinned_bytes     = 0;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
 	}
@@ -2034,16 +2066,21 @@ void TextureCache::RunGarbageCollector() {
 	const auto collect = [&](bool allow_aggressive) {
 		bool     pressured  = m_total_used_memory >= m_pressure_gc_memory;
 		bool     aggressive = allow_aggressive && m_total_used_memory >= m_critical_gc_memory;
+		// Below the pressure level only images that need no download go, soon after their last
+		// use. Past it, GPU-written images idle for a while are copied back and freed too. At the
+		// critical level that while gets shorter, not longer: with 160 frames nothing used in the
+		// last few seconds could go, and memory kept climbing past the budget.
 		uint64_t age        = 16;
 		size_t   deletions  = 10;
 		if (aggressive) {
-			age       = 160;
-			deletions = 40;
+			age       = 30;
+			deletions = 128;
 		} else if (pressured) {
 			age       = 80;
 			deletions = 20;
 		}
-		age = std::min(age, tick);
+		// What the frame that just ended used carries the previous tick: it always stays.
+		age = std::min(std::max(age, tick - last_tick + 1), tick);
 		std::vector<ImageId> candidates;
 		// Deleting depth recursively deletes its stencil association, so finish LRU traversal
 		// first.
@@ -2058,6 +2095,8 @@ void TextureCache::RunGarbageCollector() {
 			}
 			if (owner->heap_refs.load(std::memory_order_relaxed) != 0u) {
 				// Resident heaps sample it without touching it.
+				m_gc_pinned_images++;
+				m_gc_pinned_bytes += owner->AccountedSize();
 				TouchImage(*owner);
 				continue;
 			}
@@ -2081,6 +2120,8 @@ void TextureCache::RunGarbageCollector() {
 	collect(false);
 	if (m_total_used_memory >= m_critical_gc_memory) {
 		collect(true);
+		// Freed images parked for reuse still hold device memory.
+		m_graphics.FlushImagePool();
 	}
 }
 

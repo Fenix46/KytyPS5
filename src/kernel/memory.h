@@ -133,6 +133,9 @@ int UnmapAmmMemory(uint64_t vaddr, size_t size);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
+// Fault-time read of 4 bytes for a host-side load: succeeds only on the GPU thread and only when
+// those exact bytes are not GPU-written, so the caller can skip the GPU drain.
+bool                   TryReadCleanDword(uint64_t vaddr, uint32_t* value);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   CopySparseMemory(uint64_t vaddr, void* data, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);

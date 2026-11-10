@@ -49,10 +49,19 @@ public:
 
 	// A PIXEL_PIPE_STAT_DUMP to address, after the draws recorded so far.
 	void Dump(uint64_t address);
-	// Waits for the GPU to run the dumps and writes their counters.
+	// Waits for the GPU to run the dumps and writes their counters. For a guest that needs the exact
+	// result right now (predication).
 	void Publish() {
 		if (!m_dumps.empty()) {
-			PublishDumps();
+			PublishDumps(true);
+		}
+	}
+	// Never waits: dumps the GPU already ran get their exact counters; the others get a provisional
+	// "visible" one that the next call replaces once the GPU is done. For end-of-pipe signals, so
+	// the command thread does not stop to wait for the GPU.
+	void PublishAsync() {
+		if (!m_dumps.empty()) {
+			PublishDumps(false);
 		}
 	}
 
@@ -65,7 +74,9 @@ private:
 	};
 
 	int32_t BeginQuery(vk::CommandBuffer command);
-	void    PublishDumps();
+	void    PublishDumps(bool wait);
+	// The first `count` dumps' queries have been run by the GPU: writes their exact counters.
+	void FinalizeDumps(size_t count);
 
 	CommandScheduler&        m_scheduler;
 	vk::Device               m_device;

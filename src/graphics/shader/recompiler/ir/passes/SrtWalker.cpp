@@ -1438,4 +1438,38 @@ uint32_t SrtWalkerLoadLength(uint64_t rip) {
 	return code[0] == 0x41u && code[1] == 0x8bu && code[2] == 0x02u ? 3 : 0;
 }
 
+bool SrtWalkerDecodeLoad(uint64_t rip, uint32_t& length, uint32_t& dest_register) {
+	if (t_running_walker == nullptr ||
+	    rip - reinterpret_cast<uint64_t>(t_running_walker->getCode()) >= t_running_walker->getSize())
+		return false;
+	const auto* code = reinterpret_cast<const uint8_t*>(rip);
+	size_t      i    = 0;
+	uint8_t     rex  = 0;
+	if ((code[i] & 0xf0u) == 0x40u) rex = code[i++];
+	if (code[i] == 0x8bu) {
+		i += 1;
+	} else if (code[i] == 0x0fu && (code[i + 1] == 0xb7u || code[i + 1] == 0xb6u)) {
+		i += 2;
+	} else {
+		return false;
+	}
+	const uint8_t modrm = code[i++];
+	const uint8_t mod   = modrm >> 6u;
+	const uint8_t reg   = (modrm >> 3u) & 7u;
+	const uint8_t rm    = modrm & 7u;
+	if (mod == 3u) return false;
+	uint8_t sib = 0;
+	if (rm == 4u) sib = code[i++];
+	if (mod == 0u) {
+		if (rm == 5u || (rm == 4u && (sib & 7u) == 5u)) i += 4;
+	} else if (mod == 1u) {
+		i += 1;
+	} else {
+		i += 4;
+	}
+	length        = static_cast<uint32_t>(i);
+	dest_register = reg | ((rex & 4u) != 0 ? 8u : 0u);
+	return true;
+}
+
 } // namespace Libs::Graphics::ShaderRecompiler::IR

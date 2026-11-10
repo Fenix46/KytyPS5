@@ -6,6 +6,7 @@
 #include "common/threads.h"
 #include "graphics/host_gpu/vulkanCommon.h" // IWYU pragma: export
 
+#include <chrono>
 #include <map>
 #include <mutex>
 #include <span>
@@ -107,6 +108,16 @@ struct GraphicContext {
 	void               DestroyAllocator();
 	void               LogMemoryBudget() const;
 	[[nodiscard]] bool CanReportMemoryUsage() const noexcept { return memory_budget_ext_enabled; }
+	// The caches age their contents on this clock: sixtieths of a second since start. Counting
+	// frames instead made everything look recently used as soon as the frame rate dropped, which
+	// is exactly when memory has to be given back.
+	[[nodiscard]] static uint64_t CacheTick() noexcept {
+		static const auto start = std::chrono::steady_clock::now();
+		return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+		                                 std::chrono::steady_clock::now() - start)
+		                                 .count()) *
+		       60u / 1000u;
+	}
 	[[nodiscard]] uint64_t GetDeviceMemoryUsage() const;
 	[[nodiscard]] uint64_t GetTotalMemoryBudget() const;
 
@@ -114,6 +125,8 @@ struct GraphicContext {
 		uint64_t usage        = 0; // Whole process, as reported by VK_EXT_memory_budget.
 		uint64_t budget       = 0;
 		uint32_t allocations  = 0;
+		uint64_t allocation_bytes = 0; // Handed out by the allocator.
+		uint64_t block_bytes      = 0; // Taken from the driver by the allocator.
 		bool     device_local = false;
 	};
 	[[nodiscard]] uint32_t GetHeapUsage(std::span<HeapUsage, VK_MAX_MEMORY_HEAPS> heaps) const;
@@ -121,6 +134,11 @@ struct GraphicContext {
 	void                   DeleteImage(VulkanImage& image);
 	// Destroys the cached images kept for reuse by CreateImage.
 	void FlushImagePool();
+	// Diagnostics: device memory held by the reuse pool.
+	[[nodiscard]] uint64_t ImagePoolBytes() {
+		std::lock_guard lock(m_image_pool_mutex);
+		return m_image_pool_bytes;
+	}
 
 	uint32_t screen_width  = 0;
 	uint32_t screen_height = 0;

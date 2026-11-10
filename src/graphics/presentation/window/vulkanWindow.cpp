@@ -559,7 +559,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	    Config::OcclusionQueriesEnabled() && supported12.hostQueryReset;
 	graphics.occlusion_query_precise_enabled =
 	    graphics.occlusion_queries_enabled && supported2.features.occlusionQueryPrecise;
-	features12.hostQueryReset             = graphics.occlusion_queries_enabled;
+	features12.hostQueryReset             = supported12.hostQueryReset;
 	device_features.occlusionQueryPrecise = graphics.occlusion_query_precise_enabled;
 	LOGF("Vulkan occlusion queries: %s, precise: %s\n",
 	     graphics.occlusion_queries_enabled ? "true" : "false",

@@ -1,4 +1,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "common/debugCounters.h"
+#include "common/debugSampler.h"
+#include "graphics/host_gpu/renderer/gpuProfiler.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -209,7 +212,8 @@ void CommandProcessor::BufferInit() {
 void CommandProcessor::BufferFlush() {
 	GetScheduler().Flush();
 	// The occlusion counters reach a guest that polls them without waiting for a later fence.
-	m_renderer.GetOcclusionQueries().Publish();
+	m_renderer.GetOcclusionQueries().PublishAsync();
+	GpuProfiler::Poll();
 }
 
 void CommandProcessor::BufferWait() {
@@ -548,6 +552,8 @@ void CommandProcessor::SuspendPm4() {
 }
 
 // "CP op 0xNN" for profiler zones; the names live as long as the process.
+static thread_local uint32_t g_current_pm4_opcode = 0xFFFFFFFFu;
+
 static const char* CpOpcodeZoneName(uint32_t opcode) {
 	static const auto names = [] {
 		std::array<std::array<char, 16>, 256> table {};
@@ -619,8 +625,14 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		// One profiler zone per opcode, so the time CommandProcessor::Process spends in its own
 		// packet handlers shows up by kind instead of as one block.
 		ZoneTransientN(cp_opcode_zone, CpOpcodeZoneName(opcode), tracy::ProfilerAvailable());
+		if (static thread_local bool sampler_started = false; !sampler_started && Common::DebugCounters::Enabled()) {
+			sampler_started = true;
+			Common::DebugSampler::StartForCurrentThread("gpu");
+		}
+		g_current_pm4_opcode = opcode;
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
+		g_current_pm4_opcode = 0xFFFFFFFFu;
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
 			return;
@@ -852,6 +864,10 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x, thread_group_y,
 	                                              thread_group_z, mode, IsAsyncComputeQueue());
+	// Submit the dispatch and its read-back copy now, so the GPU works while commands go on.
+	if (m_renderer.GetBufferCache().TakeFlushRequest()) {
+		GetScheduler().Flush();
+	}
 }
 
 void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
@@ -869,6 +885,9 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
 	                                                IsAsyncComputeQueue());
+	if (m_renderer.GetBufferCache().TakeFlushRequest()) {
+		GetScheduler().Flush();
+	}
 }
 
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
@@ -915,8 +934,9 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		return;
 	}
 
-	// Dumped occlusion counters are written before any end-of-pipe signal reaches the guest.
-	m_renderer.GetOcclusionQueries().Publish();
+	// Dumped occlusion counters are written before any end-of-pipe signal reaches the guest; the
+	// ones the GPU has not finished yet read as visible until it does.
+	m_renderer.GetOcclusionQueries().PublishAsync();
 
 	// A label beside GPU-written bytes goes to the backing store, so they are not downloaded.
 	// Other labels go through the guest mapping: its fault keeps a clean cached copy current and
@@ -1049,7 +1069,7 @@ void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_a
 	if (graphics_debug_dump_enabled()) {
 		LOGF("CommandProcessor::Flip()\n");
 	}
-	m_renderer.GetOcclusionQueries().Publish();
+	m_renderer.GetOcclusionQueries().PublishAsync();
 
 	auto& command = CurrentBuffer();
 	auto  request = Sync::PrepareVideoOutFlip(command, handle, index, flip_mode, flip_arg);
@@ -1068,6 +1088,10 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 
 bool GuestGpu::IsGpuThread() noexcept {
 	return g_gpu_state != nullptr;
+}
+
+uint32_t GuestGpu::CurrentPm4Opcode() noexcept {
+	return g_current_pm4_opcode;
 }
 
 } // namespace Libs::Graphics

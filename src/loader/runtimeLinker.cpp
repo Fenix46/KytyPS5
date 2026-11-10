@@ -667,13 +667,46 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
 			case CoreAccess::Unknown: return false;
 		}
-		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+		Common::DebugCounters::g_fault_rip = info->exception_address;
+		Common::DebugCounters::g_fault_rsp = info->rsp;
+		if (access == GpuAccess::Read) {
+			// The SRT walker's loads are host-side and know their destination register. When the
+			// exact dword was not written by the GPU, serve it from the backing store instead of
+			// draining the GPU for a page that merely shares a 4 KB page with GPU output.
+			uint32_t value = 0;
+			if (const auto length =
+			        Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address);
+			    length != 0 &&
+			    Libs::LibKernel::Memory::TryReadCleanDword(info->access_violation_vaddr, &value)) {
+				Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, value);
+				Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
+				return true;
+			}
+		}
+		const bool handled = [&] {
+			Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::GpuFaultNs);
+			return Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
+		}();
+		if (handled) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			return true;
 		}
 		if (const auto length =
 		        Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address)) {
 			Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
+			return true;
+		}
+		// Another load inside the walker from an address that cannot be read (stale or torn guest
+		// data): complete it with zero rather than aborting the emulator.
+		if (uint32_t load_length = 0, dest = 0;
+		    Libs::Graphics::ShaderRecompiler::IR::SrtWalkerDecodeLoad(info->exception_address,
+		                                                              load_length, dest)) {
+			static std::atomic<int> reported {0};
+			if (reported.fetch_add(1, std::memory_order_relaxed) < 5) {
+				std::printf("[walker] load from unreadable 0x%016llx completed with zero\n",
+				            static_cast<unsigned long long>(info->access_violation_vaddr));
+			}
+			Loader::X64InstructionEmulator::SkipLoadTo(info->native_context, load_length, dest);
 			return true;
 		}
 	}

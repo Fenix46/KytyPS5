@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -15,9 +16,11 @@
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderVertexMetadata.h"
+#include "kernel/memory.h"
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <cstring>
@@ -159,6 +162,30 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 	}
 }
 
+// The vertex tables are read on the CPU for every draw. A game can have a compute pass fill a few
+// descriptors of the same page, and reading that page through the guest mapping then faults and
+// waits for the whole GPU queue even when the bytes needed were never written by the GPU.
+// TryReadBufferBacking only waits when the exact bytes were GPU-written, and otherwise reads
+// the backing store without a fault.
+static void ShaderReadGuestTable(const void* guest, void* out, size_t size) {
+	if (!LibKernel::Memory::TryReadBufferBacking(reinterpret_cast<uint64_t>(guest), out, size)) {
+		// Diagnostics: say why the fault-free path was refused (first few only).
+		static std::atomic<int> refused {0};
+		if (Common::DebugCounters::Enabled() && refused.fetch_add(1, std::memory_order_relaxed) < 8) {
+			std::printf("[guest table] backing read refused addr=0x%016llx size=%zu gpu_thread=%d\n",
+			            static_cast<unsigned long long>(reinterpret_cast<uint64_t>(guest)), size,
+			            GuestGpu::IsGpuThread() ? 1 : 0);
+		}
+		std::memcpy(out, guest, size);
+	} else {
+		static std::atomic<int> served {0};
+		if (Common::DebugCounters::Enabled() && served.fetch_add(1, std::memory_order_relaxed) < 3) {
+			std::printf("[guest table] backing read served addr=0x%016llx size=%zu\n",
+			            static_cast<unsigned long long>(reinterpret_cast<uint64_t>(guest)), size);
+		}
+	}
+}
+
 static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
                                        std::span<const ShaderSemantic> input_semantics,
                                        const uint32_t* attrib, const uint32_t* buffer) {
@@ -181,15 +208,18 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 			     attrib[in.semantic]);
 		}
 
-		size_t index = attrib[in.semantic] & 0x1fu;
+		uint32_t attribute = 0;
+		ShaderReadGuestTable(&attrib[in.semantic], &attribute, sizeof(attribute));
+		size_t index = attribute & 0x1fu;
 		auto   format =
-		    static_cast<Prospero::VertexAttribFormat>((attrib[in.semantic] >> 5u) & 0x1ffu);
-		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
-		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
+		    static_cast<Prospero::VertexAttribFormat>((attribute >> 5u) & 0x1ffu);
+		uint32_t offset      = (attribute >> 14u) & 0xfffu;
+		uint32_t fetch_index = (attribute >> 26u) & 0x1u;
 
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
-		const auto* sharp = &buffer[index * 4];
+		uint32_t sharp[4] {};
+		ShaderReadGuestTable(&buffer[index * 4], sharp, sizeof(sharp));
 
 		EXIT_NOT_IMPLEMENTED(info.resources_num >= ShaderVertexInputInfo::RES_MAX);
 

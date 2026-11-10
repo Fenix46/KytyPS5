@@ -23,6 +23,7 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
+#include "graphics/host_gpu/renderer/gpuProfiler.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
@@ -463,13 +464,20 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			}
 		}
 	} else {
+		const int slot = GpuProfiler::Active()
+		                     ? GpuProfiler::Begin(vk_buffer, m_context.GetCommandScheduler(),
+		                                          program.shader_hash, program.shader_hash, 0, 2,
+		                                          thread_group_x * thread_group_y * thread_group_z)
+		                     : -1;
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+		GpuProfiler::End(vk_buffer, slot);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	m_context.GetBufferCache().SpeculativeReadback();
 }
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
@@ -529,10 +537,16 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	const int slot = GpuProfiler::Active()
+	                     ? GpuProfiler::Begin(vk_buffer, m_context.GetCommandScheduler(),
+	                                          program.shader_hash ^ 1u, program.shader_hash, 1, 2, 0)
+	                     : -1;
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	GpuProfiler::End(vk_buffer, slot);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
+	m_context.GetBufferCache().SpeculativeReadback();
 }
 
 } // namespace Libs::Graphics

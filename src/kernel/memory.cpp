@@ -838,6 +838,13 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+bool TryReadCleanDword(uint64_t vaddr, uint32_t* value) {
+	if (g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, sizeof(uint32_t))) {
+		return false;
+	}
+	return g_gpu_resources->TryReadCleanDword(vaddr, value);
+}
+
 uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 	EXIT_IF(g_virtual_ranges == nullptr);
 

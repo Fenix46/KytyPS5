@@ -82,6 +82,9 @@ bool WalkedImageActive(const ResourcePlan& plan, uint32_t image);
 // Length of the guest load at rip if it belongs to the walker running on this thread, else 0.
 // The exception handler completes such a load as a zero read.
 uint32_t SrtWalkerLoadLength(uint64_t rip);
+// Any plain load (mov / movzx from memory) inside the running walker: its length and destination
+// register, so a load from an unreadable address can complete with zero instead of aborting.
+bool SrtWalkerDecodeLoad(uint64_t rip, uint32_t& length, uint32_t& dest_register);
 
 // Nonnegative affine coefficients: element zero is constant, remaining elements are
 // caller-selected leaves. Runtime range proofs must additionally exclude U32 wrap.

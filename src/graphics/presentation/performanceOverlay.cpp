@@ -637,7 +637,11 @@ void DrawGpu(const Snapshot& shown, const GraphicContext& graphics) {
 		                      Rate(shown, Counter::Dispatches)));
 		Row("Queue submits", Fmt("%.0f/s", Rate(shown, Counter::QueueSubmits)));
 		const auto faults = Rate(shown, Counter::GpuFaults);
-		Row("Write-tracking faults", Fmt("%.0f/s", faults), LevelColor(faults, 20000, 100000));
+		Row("Write-tracking faults",
+		    Fmt("%.0f/s  (handler %.0f ms/s)", faults, Rate(shown, Counter::GpuFaultNs) / 1e6),
+		    LevelColor(faults, 20000, 100000));
+		Row("  on GPU thread", Fmt("%.0f/s  (%.0f ms/s)", Rate(shown, Counter::GpuThreadFaults),
+		                          Rate(shown, Counter::GpuThreadFaultNs) / 1e6));
 		CompilationRows(shown);
 		ImGui::EndTable();
 	}
