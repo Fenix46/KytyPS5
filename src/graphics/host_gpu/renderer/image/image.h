@@ -7,6 +7,8 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <compare>
 #include <limits>
@@ -67,6 +69,35 @@ public:
 	             const ImageSubresourceRange& destination_range);
 	void CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tiler);
 	void CopyMip(Image& source, uint32_t mip, uint32_t layer);
+
+	// With --internal-resolution the host image can be smaller than the guest one it stands for:
+	// info keeps the guest size, backing the host one.
+	[[nodiscard]] bool IsScaled() const noexcept {
+		return backing.image != nullptr && (backing.extent.width != info.extent.width ||
+		                                    backing.extent.height != info.extent.height);
+	}
+	// What the host image lacks of a guest texel on x (low half) and y, in 1/65536: shaders
+	// bring guest texel coordinates to the host image with it. 0 for an unscaled image.
+	[[nodiscard]] uint32_t ScaleLoss() const noexcept {
+		if (!IsScaled()) {
+			return 0;
+		}
+		const auto loss = [](uint64_t guest, uint64_t host) {
+			return static_cast<uint32_t>(std::min<uint64_t>((guest - host) * 65536u / guest, 0xffffu));
+		};
+		return loss(info.extent.width, backing.extent.width) |
+		       (loss(info.extent.height, backing.extent.height) << 16u);
+	}
+	// The host size of a guest-sized area of this image, rounded down and never empty.
+	[[nodiscard]] vk::Extent2D HostExtent(vk::Extent2D guest) const noexcept {
+		if (!IsScaled()) {
+			return guest;
+		}
+		return {std::max<uint32_t>(1u, static_cast<uint32_t>(uint64_t {guest.width} *
+		                                                     backing.extent.width / info.extent.width)),
+		        std::max<uint32_t>(1u, static_cast<uint32_t>(uint64_t {guest.height} *
+		                                                     backing.extent.height / info.extent.height))};
+	}
 
 	void MarkCpuDirty() {
 		m_cpu_dirty       = true;
@@ -159,6 +190,16 @@ private:
 	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,
 	                                                   uint64_t capacity) noexcept;
+	// Transfers of a scaled image go through a guest-sized image and a blit.
+	void               UploadScaled(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
+	                                uint64_t offset, uint64_t size);
+	void               DownloadScaled(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
+	                                  uint64_t offset, uint64_t size);
+	[[nodiscard]] bool CanBlitFrom(const Image& source) const;
+	[[nodiscard]] vk::Filter BlitFilter(vk::ImageAspectFlags aspects) const;
+	// The host texels of one level that cover the guest texels [begin, end) on both axes.
+	[[nodiscard]] std::array<vk::Offset3D, 2> HostRect(uint32_t level, vk::Offset3D begin,
+	                                                   vk::Extent3D extent) const;
 	[[nodiscard]] static std::pair<uint32_t, uint32_t>
 	SanitizeCopyLayers(const Image& source, const Image& destination, uint32_t depth);
 
@@ -174,6 +215,9 @@ private:
 namespace ImageOps {
 
 void                                 Validate(const ImageInfo& info);
+// The size an image of this description gets on the host: the guest size, or less when
+// --internal-resolution caps it.
+[[nodiscard]] vk::Extent3D           HostExtent(const GraphicContext& graphics, const ImageInfo& info);
 [[nodiscard]] Prospero::BufferFormat RenderTargetTransferFormat(uint32_t bytes_per_element);
 
 } // namespace ImageOps

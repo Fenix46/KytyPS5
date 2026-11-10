@@ -120,9 +120,9 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	        source_info.samples != 1 || destination_info.samples <= 1 ||
 	        destination_info.samples > 4 || source.backing.image_type != vk::ImageType::e2D ||
 	        destination.backing.image_type != vk::ImageType::e2D ||
-	        source_info.extent.width != destination_info.extent.width ||
-	        source_info.extent.height != destination_info.extent.height ||
-	        source_info.extent.depth != 1 || destination_info.extent.depth != 1 ||
+	        source.backing.extent.width != destination.backing.extent.width ||
+	        source.backing.extent.height != destination.backing.extent.height ||
+	        source_info.extent.depth != 1 || destination.backing.extent.depth != 1 ||
 	        source.backing.image == nullptr || destination.backing.image == nullptr);
 	m_scheduler.EndRendering();
 
@@ -155,7 +155,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	depth_attachment.clearValue.depthStencil = {0.0f, 0};
 
 	vk::RenderingInfo rendering {};
-	rendering.renderArea.extent = {destination_info.extent.width, destination_info.extent.height};
+	rendering.renderArea.extent = {destination.backing.extent.width, destination.backing.extent.height};
 	rendering.layerCount        = 1;
 	rendering.pDepthAttachment  = &depth_attachment;
 	command.beginRendering(&rendering);
@@ -175,12 +175,12 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 
 	const vk::Viewport viewport {0.0f,
 	                             0.0f,
-	                             static_cast<float>(destination_info.extent.width),
-	                             static_cast<float>(destination_info.extent.height),
+	                             static_cast<float>(destination.backing.extent.width),
+	                             static_cast<float>(destination.backing.extent.height),
 	                             0.0f,
 	                             1.0f};
 	const vk::Rect2D   scissor {{0, 0},
-	                            {destination_info.extent.width, destination_info.extent.height}};
+	                            {destination.backing.extent.width, destination.backing.extent.height}};
 	command.setViewport(0, 1, &viewport);
 	command.setScissor(0, 1, &scissor);
 	command.draw(3, 1, 0, 0);

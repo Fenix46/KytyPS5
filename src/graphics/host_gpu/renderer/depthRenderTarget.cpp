@@ -405,7 +405,13 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 		region.srcSubresource = {aspect, range.base_level, range.base_layer,
 		                         range.layer_count};
 		region.dstSubresource = region.srcSubresource;
-		region.extent = write_desc.info.extent;
+		// The host size: both images shrink alike under --internal-resolution.
+		region.extent = vk::Extent3D {
+		    std::min(std::max(source.backing.extent.width >> range.base_level, 1u),
+		             std::max(destination.backing.extent.width >> range.base_level, 1u)),
+		    std::min(std::max(source.backing.extent.height >> range.base_level, 1u),
+		             std::max(destination.backing.extent.height >> range.base_level, 1u)),
+		    1};
 	}
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 	                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,

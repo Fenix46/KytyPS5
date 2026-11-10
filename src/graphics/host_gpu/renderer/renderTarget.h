@@ -27,6 +27,9 @@ struct RenderState {
 	RenderAttachment                                           depth_stencil_attachment;
 	uint32_t                                                   width                 = 0;
 	uint32_t                                                   height                = 0;
+	// The size the guest sees; larger than width x height under --internal-resolution.
+	uint32_t                                                   guest_width           = 0;
+	uint32_t                                                   guest_height          = 0;
 	uint32_t                                                   num_layers            = 1;
 	uint32_t                                                   num_color_attachments = 0;
 

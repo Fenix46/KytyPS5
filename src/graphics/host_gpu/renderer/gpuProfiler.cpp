@@ -22,11 +22,13 @@ struct Pending {
 	uint64_t key;
 	uint64_t a, b;
 	uint32_t kind, work;
+	uint32_t width, height;
 };
 
 struct Total {
 	uint64_t a = 0, b = 0;
 	uint32_t kind = 0;
+	uint32_t width = 0, height = 0;
 	uint64_t ns = 0, count = 0, work = 0;
 };
 
@@ -66,7 +68,7 @@ bool Active() {
 }
 
 int Begin(vk::CommandBuffer command, CommandScheduler& scheduler, uint64_t key, uint64_t a,
-          uint64_t b, uint32_t kind, uint32_t work) {
+          uint64_t b, uint32_t kind, uint32_t work, uint32_t width, uint32_t height) {
 	if (!g_ready || g_inuse + 2 > QUERY_COUNT) {
 		return -1;
 	}
@@ -78,7 +80,9 @@ int Begin(vk::CommandBuffer command, CommandScheduler& scheduler, uint64_t key, 
 	g_next += 2;
 	g_inuse += 2;
 	command.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, g_pool, first);
-	g_pending.push_back({first, scheduler.CurrentTick(), key, a, b, kind, work});
+	// One line per target size: the same shaders cost differently at another resolution.
+	key ^= (uint64_t {width} << 40u) ^ (uint64_t {height} << 24u);
+	g_pending.push_back({first, scheduler.CurrentTick(), key, a, b, kind, work, width, height});
 	return static_cast<int>(first);
 }
 
@@ -110,6 +114,8 @@ void Poll() {
 		t.a = p.a;
 		t.b = p.b;
 		t.kind = p.kind;
+		t.width = p.width;
+		t.height = p.height;
 		t.ns += ns;
 		t.count++;
 		t.work += p.work;
@@ -125,11 +131,12 @@ void Poll() {
 	            static_cast<double>(g_total_ns) / 1e6);
 	for (size_t i = 0; i < items.size() && i < 12; i++) {
 		const auto& t = items[i].second;
-		std::printf("[gpu] %5.1f ms  %6llu calls  %s  a=%016llx b=%016llx  avg work=%llu\n",
+		std::printf("[gpu] %5.1f ms  %6llu calls  %s  a=%016llx b=%016llx  avg work=%llu  target %ux%u\n",
 		            static_cast<double>(t.ns) / 1e6, static_cast<unsigned long long>(t.count),
 		            t.kind == 0 ? "draw" : t.kind == 1 ? "mesh" : "cs  ",
 		            static_cast<unsigned long long>(t.a), static_cast<unsigned long long>(t.b),
-		            static_cast<unsigned long long>(t.count != 0 ? t.work / t.count : 0));
+		            static_cast<unsigned long long>(t.count != 0 ? t.work / t.count : 0), t.width,
+		            t.height);
 	}
 	std::fflush(stdout);
 	g_totals.clear();

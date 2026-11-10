@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 
 #include "common/assert.h"
+#include "common/emulatorConfig.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -14,7 +15,10 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <fmt/format.h>
+#include <memory>
 #include <xxhash.h>
 
 namespace Libs::Graphics {
@@ -250,6 +254,10 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
                    uint64_t size) {
 	EXIT_IF(copies.empty() || buffer == nullptr || size == 0);
+	if (IsScaled()) {
+		UploadScaled(copies, buffer, offset, size);
+		return;
+	}
 	m_scheduler.EndRendering();
 	vk::BufferMemoryBarrier2 buffer_barrier {};
 	buffer_barrier.srcStageMask        = vk::PipelineStageFlagBits2::eAllCommands;
@@ -289,6 +297,10 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
                      uint64_t offset, uint64_t size) {
 	EXIT_IF(copies.empty() || buffer == nullptr || size == 0);
+	if (IsScaled()) {
+		DownloadScaled(copies, buffer, offset, size);
+		return;
+	}
 	m_scheduler.EndRendering();
 	vk::BufferMemoryBarrier2 buffer_barrier {};
 	buffer_barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
@@ -350,6 +362,36 @@ void Image::CopyImage(Image& source) {
 	EXIT_IF(source.backing.samples != backing.samples);
 	m_scheduler.EndRendering();
 	const uint32_t levels     = std::min(source.backing.mip_levels, backing.mip_levels);
+	if ((IsScaled() || source.IsScaled()) && CanBlitFrom(source)) {
+		// The same guest area has a different size in each image, so it is scaled across.
+		const auto aspects = FullAspectMask(backing.format) & ~vk::ImageAspectFlagBits::eStencil;
+		const auto layers  = std::min(source.backing.layers, backing.layers);
+		std::array<vk::ImageBlit, std::tuple_size_v<decltype(ImageInfo::mip_layout)>> blits {};
+		for (uint32_t level = 0; level < levels; level++) {
+			const vk::Extent3D guest {
+			    std::min(std::max(source.info.extent.width >> level, 1u),
+			             std::max(info.extent.width >> level, 1u)),
+			    std::min(std::max(source.info.extent.height >> level, 1u),
+			             std::max(info.extent.height >> level, 1u)),
+			    1};
+			auto& blit          = blits[level];
+			blit.srcSubresource = vk::ImageSubresourceLayers {aspects, level, 0, layers};
+			blit.dstSubresource = vk::ImageSubresourceLayers {aspects, level, 0, layers};
+			blit.srcOffsets     = source.HostRect(level, {}, guest);
+			blit.dstOffsets     = HostRect(level, {}, guest);
+		}
+		auto command = m_scheduler.Current().Handle();
+		source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+		               {}, command);
+		Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
+		        command);
+		command.blitImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
+		                  backing.image, vk::ImageLayout::eTransferDstOptimal, levels, blits.data(),
+		                  BlitFilter(aspects));
+		Transit(vk::ImageLayout::eGeneral,
+		        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
+		return;
+	}
 	uint32_t       base_depth = source.backing.extent.depth;
 	if (source.backing.image_type == backing.image_type) {
 		base_depth = std::min(base_depth, backing.extent.depth);
@@ -468,6 +510,20 @@ uint32_t Image::CopyRows(uint64_t row_size, uint32_t rows, uint64_t capacity) no
 
 void Image::CopyImageWithBuffer(Image& source, Buffer& buffer, TileManager& tiler) {
 	EXIT_IF(buffer.Handle() == nullptr || source.backing.samples != 1 || backing.samples != 1);
+	if ((IsScaled() || source.IsScaled()) &&
+	    (source.backing.extent.width > backing.extent.width ||
+	     source.backing.extent.height > backing.extent.height)) {
+		// Bytes cannot be reinterpreted across two host sizes; the destination keeps its contents.
+		static std::atomic_flag warned = ATOMIC_FLAG_INIT;
+		if (!warned.test_and_set(std::memory_order_relaxed)) {
+			std::printf("[scale] skipped a cross-format copy from %ux%u (host %ux%u) into %ux%u "
+			            "(host %ux%u)\n",
+			            source.info.extent.width, source.info.extent.height,
+			            source.backing.extent.width, source.backing.extent.height, info.extent.width,
+			            info.extent.height, backing.extent.width, backing.extent.height);
+		}
+		return;
+	}
 	m_scheduler.EndRendering();
 	const uint32_t levels = std::min(source.backing.mip_levels, backing.mip_levels);
 	const auto     source_aspect =
@@ -574,10 +630,32 @@ void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
 	const auto width  = std::max(backing.extent.width >> mip, 1u);
 	const auto height = std::max(backing.extent.height >> mip, 1u);
 	const auto depth  = std::max(backing.extent.depth >> mip, 1u);
-	EXIT_IF(width != source.backing.extent.width || height != source.backing.extent.height);
 	const auto [source_layers, destination_layers] = SanitizeCopyLayers(source, *this, depth);
 	const auto aspects                             = FullAspectMask(source.backing.format);
 	EXIT_IF(aspects != FullAspectMask(backing.format));
+	if (width != source.backing.extent.width || height != source.backing.extent.height) {
+		// Only a scaled image differs in size from the level it stands for.
+		EXIT_IF((!IsScaled() && !source.IsScaled()) || !CanBlitFrom(source) ||
+		        source_layers != destination_layers);
+		vk::ImageBlit blit {};
+		blit.srcSubresource = vk::ImageSubresourceLayers {aspects, 0, 0, source_layers};
+		blit.dstSubresource = vk::ImageSubresourceLayers {aspects, mip, layer, destination_layers};
+		blit.srcOffsets[1]  = vk::Offset3D {static_cast<int32_t>(source.backing.extent.width),
+		                                    static_cast<int32_t>(source.backing.extent.height), 1};
+		blit.dstOffsets[1]  =
+		    vk::Offset3D {static_cast<int32_t>(width), static_cast<int32_t>(height), 1};
+		auto command = m_scheduler.Current().Handle();
+		Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
+		        command);
+		source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+		               {}, command);
+		command.blitImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
+		                  backing.image, vk::ImageLayout::eTransferDstOptimal, blit,
+		                  BlitFilter(aspects));
+		Transit(vk::ImageLayout::eGeneral,
+		        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
+		return;
+	}
 	std::array<vk::ImageCopy, 2> copies {};
 	uint32_t                     copy_count = 0;
 	for (const auto aspect: {vk::ImageAspectFlagBits::eColor, vk::ImageAspectFlagBits::eDepth,
@@ -600,7 +678,254 @@ void Image::CopyMip(Image& source, uint32_t mip, uint32_t layer) {
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }
 
+namespace {
+
+[[nodiscard]] bool CanBlit(const GraphicContext& graphics, vk::Format format) {
+	constexpr auto both = vk::FormatFeatureFlagBits::eBlitSrc | vk::FormatFeatureFlagBits::eBlitDst;
+	return (graphics.GetFormatProperties(format).optimalTilingFeatures & both) == both;
+}
+
+// Color and depth targets have to shrink together, so every depth format must take a blit.
+[[nodiscard]] bool ScalingSupported(const GraphicContext& graphics) {
+	static const bool supported = [&] {
+		const bool depth = CanBlit(graphics, vk::Format::eD16Unorm) &&
+		                   CanBlit(graphics, vk::Format::eD32Sfloat) &&
+		                   CanBlit(graphics, vk::Format::eD32SfloatS8Uint);
+		if (!depth) {
+			std::printf("[scale] --internal-resolution is ignored: this GPU cannot scale depth "
+			            "images\n");
+		} else {
+			std::printf("[scale] internal resolution capped at %u lines\n",
+			            Config::GetInternalResolution());
+		}
+		return depth;
+	}();
+	return supported;
+}
+
+[[nodiscard]] bool IsNumericFormat(vk::Format format, const char* kind) {
+	// Format names end in their numeric kind, and packed ones in the pack size after it.
+	return vk::to_string(format).find(kind) != std::string::npos;
+}
+
+// A guest-sized stand-in for one transfer of a scaled image.
+[[nodiscard]] std::shared_ptr<VulkanImage> CreateTransferImage(GraphicContext& graphics,
+                                                               const Image&    image) {
+	vk::ImageCreateInfo create {};
+	create.usage         = image.backing.usage;
+	create.flags         = image.backing.flags;
+	create.imageType     = image.backing.image_type;
+	create.extent        = image.info.extent;
+	create.mipLevels     = image.backing.mip_levels;
+	create.arrayLayers   = image.backing.layers;
+	create.format        = image.backing.format;
+	create.tiling        = vk::ImageTiling::eOptimal;
+	create.initialLayout = vk::ImageLayout::eUndefined;
+	create.samples       = vk::SampleCountFlagBits::e1;
+	auto transfer        = std::make_shared<VulkanImage>();
+	if (!graphics.CreateImage(create, *transfer)) {
+		EXIT("failed to create a transfer image: extent=%ux%u format=%d\n", create.extent.width,
+		     create.extent.height, static_cast<int>(create.format));
+	}
+	return transfer;
+}
+
+void TransferImageBarrier(vk::CommandBuffer command, const VulkanImage& image,
+                          vk::ImageAspectFlags aspects, vk::ImageLayout from, vk::ImageLayout to) {
+	const bool              fresh = from == vk::ImageLayout::eUndefined;
+	vk::ImageMemoryBarrier2 barrier {};
+	barrier.srcStageMask =
+	    fresh ? vk::PipelineStageFlagBits2::eNone : vk::PipelineStageFlagBits2::eAllTransfer;
+	barrier.srcAccessMask =
+	    fresh ? vk::AccessFlagBits2::eNone : vk::AccessFlagBits2::eTransferWrite;
+	barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllTransfer;
+	barrier.dstAccessMask = to == vk::ImageLayout::eTransferSrcOptimal
+	                            ? vk::AccessFlagBits2::eTransferRead
+	                            : vk::AccessFlagBits2::eTransferWrite;
+	barrier.oldLayout           = from;
+	barrier.newLayout           = to;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image               = image.image;
+	barrier.subresourceRange    =
+	    vk::ImageSubresourceRange {aspects, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+	vk::DependencyInfo dependency {};
+	dependency.imageMemoryBarrierCount = 1;
+	dependency.pImageMemoryBarriers    = &barrier;
+	command.pipelineBarrier2(dependency);
+}
+
+// Hands a buffer range to the transfer stage (begin) or back to everything else.
+void TransferBufferBarrier(vk::CommandBuffer command, vk::Buffer buffer, uint64_t offset,
+                           uint64_t size, bool begin, bool write) {
+	const vk::AccessFlags2 host =
+	    vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+	const vk::AccessFlags2 access =
+	    write ? vk::AccessFlagBits2::eTransferWrite : vk::AccessFlagBits2::eTransferRead;
+	vk::BufferMemoryBarrier2 barrier {};
+	barrier.srcStageMask        = begin ? vk::PipelineStageFlagBits2::eAllCommands
+	                                    : vk::PipelineStageFlagBits2::eAllTransfer;
+	barrier.srcAccessMask       = begin ? host : access;
+	barrier.dstStageMask        = begin ? vk::PipelineStageFlagBits2::eAllTransfer
+	                                    : vk::PipelineStageFlagBits2::eAllCommands;
+	barrier.dstAccessMask       = begin ? access : host;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer              = buffer;
+	barrier.offset              = offset;
+	barrier.size                = size;
+	vk::DependencyInfo dependency {};
+	dependency.bufferMemoryBarrierCount = 1;
+	dependency.pBufferMemoryBarriers    = &barrier;
+	command.pipelineBarrier2(dependency);
+}
+
+} // namespace
+
+bool Image::CanBlitFrom(const Image& source) const {
+	if (source.backing.samples != 1 || backing.samples != 1 ||
+	    source.backing.image_type != vk::ImageType::e2D ||
+	    backing.image_type != vk::ImageType::e2D ||
+	    !CanBlit(m_graphics, source.backing.format) || !CanBlit(m_graphics, backing.format)) {
+		return false;
+	}
+	if (FullAspectMask(source.backing.format) != vk::ImageAspectFlagBits::eColor ||
+	    FullAspectMask(backing.format) != vk::ImageAspectFlagBits::eColor) {
+		return source.backing.format == backing.format;
+	}
+	return IsNumericFormat(source.backing.format, "Uint") ==
+	           IsNumericFormat(backing.format, "Uint") &&
+	       IsNumericFormat(source.backing.format, "Sint") == IsNumericFormat(backing.format, "Sint");
+}
+
+vk::Filter Image::BlitFilter(vk::ImageAspectFlags aspects) const {
+	const bool linear = static_cast<bool>(
+	    m_graphics.GetFormatProperties(backing.format).optimalTilingFeatures &
+	    vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+	return aspects == vk::ImageAspectFlagBits::eColor && linear ? vk::Filter::eLinear
+	                                                           : vk::Filter::eNearest;
+}
+
+std::array<vk::Offset3D, 2> Image::HostRect(uint32_t level, vk::Offset3D begin,
+                                            vk::Extent3D extent) const {
+	const auto map = [level](int32_t first, uint32_t count, uint32_t guest_size,
+	                         uint32_t host_size) -> std::pair<int32_t, int32_t> {
+		const uint64_t guest = std::max(guest_size >> level, 1u);
+		const uint64_t host  = std::max(host_size >> level, 1u);
+		const uint64_t end   = static_cast<uint64_t>(first) + count;
+		auto           low   = static_cast<uint64_t>(first) * host / guest;
+		auto           high  = std::min(host, (end * host + guest - 1) / guest);
+		low                  = std::min(low, host - 1);
+		high                 = std::max(high, low + 1);
+		return {static_cast<int32_t>(low), static_cast<int32_t>(high)};
+	};
+	const auto [left, right] = map(begin.x, extent.width, info.extent.width, backing.extent.width);
+	const auto [top, bottom] =
+	    map(begin.y, extent.height, info.extent.height, backing.extent.height);
+	return {vk::Offset3D {left, top, 0}, vk::Offset3D {right, bottom, 1}};
+}
+
+void Image::UploadScaled(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
+                         uint64_t offset, uint64_t size) {
+	EXIT_IF(backing.samples != 1);
+	m_scheduler.EndRendering();
+	const auto aspects  = FullAspectMask(backing.format);
+	const auto transfer = CreateTransferImage(m_graphics, *this);
+	auto       command  = m_scheduler.Current().Handle();
+	TransferBufferBarrier(command, buffer, offset, size, true, false);
+	TransferImageBarrier(command, *transfer, aspects, vk::ImageLayout::eUndefined,
+	                     vk::ImageLayout::eTransferDstOptimal);
+	command.copyBufferToImage(buffer, transfer->image, vk::ImageLayout::eTransferDstOptimal,
+	                          static_cast<uint32_t>(copies.size()), copies.data());
+	TransferImageBarrier(command, *transfer, aspects, vk::ImageLayout::eTransferDstOptimal,
+	                     vk::ImageLayout::eTransferSrcOptimal);
+	Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {}, command);
+	for (const auto& copy: copies) {
+		vk::ImageBlit blit {};
+		blit.srcSubresource = copy.imageSubresource;
+		blit.dstSubresource = copy.imageSubresource;
+		blit.srcOffsets[0]  = copy.imageOffset;
+		blit.srcOffsets[1]  =
+		    vk::Offset3D {copy.imageOffset.x + static_cast<int32_t>(copy.imageExtent.width),
+		                  copy.imageOffset.y + static_cast<int32_t>(copy.imageExtent.height), 1};
+		blit.dstOffsets =
+		    HostRect(copy.imageSubresource.mipLevel, copy.imageOffset, copy.imageExtent);
+		command.blitImage(transfer->image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
+		                  vk::ImageLayout::eTransferDstOptimal, blit,
+		                  BlitFilter(copy.imageSubresource.aspectMask));
+	}
+	TransferBufferBarrier(command, buffer, offset, size, false, false);
+	Transit(vk::ImageLayout::eGeneral,
+	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
+	m_scheduler.DeferOperation(
+	    [graphics = &m_graphics, transfer] { graphics->DeleteImage(*transfer); });
+}
+
+void Image::DownloadScaled(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
+                           uint64_t offset, uint64_t size) {
+	EXIT_IF(backing.samples != 1);
+	m_scheduler.EndRendering();
+	const auto aspects  = FullAspectMask(backing.format);
+	const auto transfer = CreateTransferImage(m_graphics, *this);
+	auto       command  = m_scheduler.Current().Handle();
+	TransferBufferBarrier(command, buffer, offset, size, true, true);
+	TransferImageBarrier(command, *transfer, aspects, vk::ImageLayout::eUndefined,
+	                     vk::ImageLayout::eTransferDstOptimal);
+	Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {}, command);
+	for (const auto& copy: copies) {
+		vk::ImageBlit blit {};
+		blit.srcSubresource = copy.imageSubresource;
+		blit.dstSubresource = copy.imageSubresource;
+		blit.srcOffsets =
+		    HostRect(copy.imageSubresource.mipLevel, copy.imageOffset, copy.imageExtent);
+		blit.dstOffsets[0] = copy.imageOffset;
+		blit.dstOffsets[1] =
+		    vk::Offset3D {copy.imageOffset.x + static_cast<int32_t>(copy.imageExtent.width),
+		                  copy.imageOffset.y + static_cast<int32_t>(copy.imageExtent.height), 1};
+		command.blitImage(backing.image, vk::ImageLayout::eTransferSrcOptimal, transfer->image,
+		                  vk::ImageLayout::eTransferDstOptimal, blit,
+		                  BlitFilter(copy.imageSubresource.aspectMask));
+	}
+	TransferImageBarrier(command, *transfer, aspects, vk::ImageLayout::eTransferDstOptimal,
+	                     vk::ImageLayout::eTransferSrcOptimal);
+	command.copyImageToBuffer(transfer->image, vk::ImageLayout::eTransferSrcOptimal, buffer,
+	                          static_cast<uint32_t>(copies.size()), copies.data());
+	TransferBufferBarrier(command, buffer, offset, size, false, true);
+	m_scheduler.DeferOperation(
+	    [graphics = &m_graphics, transfer] { graphics->DeleteImage(*transfer); });
+}
+
 namespace ImageOps {
+
+vk::Extent3D HostExtent(const GraphicContext& graphics, const ImageInfo& info) {
+	const uint64_t cap_height = Config::GetInternalResolution();
+	if (cap_height == 0 || info.pixel_format == vk::Format::eUndefined || info.IsVolume() ||
+	    info.extent.depth != 1 || info.IsBlock() || info.resources.levels != 1) {
+		return info.extent;
+	}
+	const uint64_t width     = info.extent.width;
+	const uint64_t height    = info.extent.height;
+	const uint64_t cap_width = (cap_height * 16 + 8) / 9;
+	if (width <= cap_width && height <= cap_height) {
+		return info.extent;
+	}
+	// Only screen-shaped images shrink: shadow maps and atlases keep their size.
+	const auto wide = width * 9;
+	const auto tall = height * 16;
+	if ((wide > tall ? wide - tall : tall - wide) * 50 > wide) {
+		return info.extent;
+	}
+	if (!ScalingSupported(graphics) || !CanBlit(graphics, info.pixel_format)) {
+		return info.extent;
+	}
+	auto host_height = std::min(height, cap_height);
+	auto host_width  = std::max<uint64_t>(1, (width * host_height + height / 2) / height);
+	if (host_width > cap_width) {
+		host_width  = cap_width;
+		host_height = std::max<uint64_t>(1, (height * host_width + width / 2) / width);
+	}
+	return {static_cast<uint32_t>(host_width), static_cast<uint32_t>(host_height), 1};
+}
 
 void Validate(const ImageInfo& info) {
 	ValidateOptionalRange(info.data, "data");
@@ -702,7 +1027,7 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	create.usage         = ImageUsageFlags(graphics, info);
 	create.flags         = ImageCreateFlags(graphics, info, create.usage);
 	create.imageType     = HostImageType(info.type);
-	create.extent        = info.extent;
+	create.extent        = ImageOps::HostExtent(graphics, info);
 	create.mipLevels     = info.resources.levels;
 	create.arrayLayers   = info.IsVolume() ? 1u : info.resources.layers;
 	create.format        = info.pixel_format;

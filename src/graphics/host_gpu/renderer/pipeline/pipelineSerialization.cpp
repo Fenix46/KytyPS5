@@ -45,7 +45,7 @@ struct Frame {
 // Bump whenever the record layout or the shader recompiler output changes, so stale stores are
 // discarded. It used to be the executable's modification time, which threw the whole cache away on
 // every new build; the driver and GPU are still checked through SpirvProfile in the header.
-constexpr uint64_t SHADER_STORE_FORMAT_VERSION = 1;
+constexpr uint64_t SHADER_STORE_FORMAT_VERSION = 2;
 
 uint64_t BuildStamp() {
 	return SHADER_STORE_FORMAT_VERSION;

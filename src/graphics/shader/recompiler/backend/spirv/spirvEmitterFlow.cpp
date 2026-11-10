@@ -79,6 +79,24 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 		                          TypePointer(state, spv::StorageClassInput, TypeF32(state)),
 		                          pointer, variable, ConstantU32(state, component));
 		state.builder.AddFunction(spv::OpLoad, TypeF32(state), value, pointer);
+		const auto& bindings = state.program.bindings;
+		if (kind == IR::StageInputKind::FragCoord && component < 2u && bindings.scale_dwords != 0) {
+			// The targets are smaller under --internal-resolution; the guest computes with its
+			// own pixels. The last scale dword holds what the targets lack of a guest pixel.
+			const auto u32  = TypeU32(state);
+			const auto f32  = TypeF32(state);
+			const auto word =
+			    EmitShaderDataDwordLoad(state, bindings.ScaleDword() + bindings.scale_dwords - 1u);
+			const auto loss = EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+			    state, word, ConstantU32(state, component * 16u), ConstantU32(state, 16));
+			const auto ratio  = Binary(state, spv::OpISub, u32, ConstantU32(state, 65536u), loss);
+			const auto ratiof = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpConvertUToF, f32, ratiof, ratio);
+			const auto wide  = Binary(state, spv::OpFMul, f32, value, ConstantF32Value(state, 65536.0f));
+			const auto guest = Binary(state, spv::OpFDiv, f32, wide, ratiof);
+			state.builder.AddFunction(spv::OpBitcast, u32, bits, guest);
+			return bits;
+		}
 		state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
 		return bits;
 	}

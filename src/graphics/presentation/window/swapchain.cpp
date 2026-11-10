@@ -941,7 +941,9 @@ Presenter::Frame& Presenter::PrepareFrame(CommandBuffer& buffer, const ImageInfo
 		case vk::Format::eB8G8R8A8Srgb: frame_format = vk::Format::eB8G8R8A8Unorm; break;
 		default: break;
 	}
-	auto* frame = m_impl->frames.Acquire({info.extent.width, info.extent.height}, frame_format);
+	// The frame has the size of the image on the host, which --internal-resolution can shrink.
+	const auto host = ImageOps::HostExtent(m_impl->window.graphic_ctx, info);
+	auto* frame     = m_impl->frames.Acquire({host.width, host.height}, frame_format);
 	frame->hdr   = hdr;
 	frame->blank = false;
 	Common::LockGuard render_lock(m_impl->renderer.GetMutex());

@@ -752,6 +752,17 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		prepared.shader_data.push_back(snapshot.user_data[reg - program.user_data_base]);
 	}
 	prepared.shader_data.resize(program.bindings.ShaderDataDwords());
+	if (program.bindings.scale_dwords != 0) {
+		// --internal-resolution: what each image lacks of its guest size. The last dword, for the
+		// render targets, is set by the draw.
+		auto& cache = m_context.GetTextureCache();
+		for (uint32_t i = 0; i < program.info.images.size(); i++) {
+			if (const auto id = prepared.images[i].image_id; id) {
+				prepared.shader_data[program.bindings.ScaleDword() + i] =
+				    cache.GetImage(id).ScaleLoss();
+			}
+		}
+	}
 	if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
 	}
@@ -824,7 +835,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 
 	prepared.buffers.resize(layout.descriptor_counts[static_cast<size_t>(BindingKind::Buffers)]);
 	std::fill(prepared.shader_data.begin() + layout.memory_offset_dword,
-	          prepared.shader_data.end(), 0);
+	          prepared.shader_data.begin() + layout.ScaleDword(), 0);
 	auto pack_memory_offset = [&](uint32_t index, uint32_t offset) {
 		const auto dword = layout.memory_offset_dword + index / 4u;
 		const auto shift = (index % 4u) * 8u;

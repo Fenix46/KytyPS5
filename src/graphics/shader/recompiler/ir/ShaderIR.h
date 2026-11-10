@@ -496,6 +496,9 @@ struct Bindings {
 	uint32_t push_data_start_dword = PushData::NoStart;
 	uint32_t dispatch_thread_dword = PushData::NoStart;
 	uint32_t memory_offset_dword = 0;
+	// With --internal-resolution: one dword per image and a last one for the render targets,
+	// each the share of a guest texel the host image lacks on x (low half) and y, in 1/65536.
+	uint32_t scale_dwords = 0;
 
 	// Packed 8-bit binding offsets, then each binding's bound range in bytes: OpArrayLength
 	// reads 0 for ranges of 2 GiB or more on NVIDIA.
@@ -503,10 +506,11 @@ struct Bindings {
 		return memory_offset_dword +
 		       (descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Buffers)] + 3u) / 4u;
 	}
-	[[nodiscard]] uint32_t ShaderDataDwords() const {
+	[[nodiscard]] uint32_t ScaleDword() const {
 		return MemorySizeDword() +
 		       descriptor_counts[static_cast<size_t>(DescriptorBindingKind::Buffers)];
 	}
+	[[nodiscard]] uint32_t ShaderDataDwords() const { return ScaleDword() + scale_dwords; }
 	[[nodiscard]] bool UsesPushData() const {
 		return push_data_start_dword != PushData::NoStart;
 	}

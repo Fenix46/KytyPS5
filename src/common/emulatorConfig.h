@@ -49,6 +49,8 @@ constexpr bool IsConfiguredUserIdValid(int32_t user_id) {
 struct ConfigOptions {
 	uint32_t               screen_width                = 1280;
 	uint32_t               screen_height               = 720;
+	// Height the guest's 16:9 images are capped to on the host; 0 keeps the guest's sizes.
+	uint32_t               internal_resolution         = 0;
 	std::string            user_name                   = "Kyty";
 	int32_t                user_id                     = DEFAULT_USER_ID;
 	std::string            audio_input_device;
@@ -111,6 +113,7 @@ void Load(const ConfigOptions& cfg);
 
 uint32_t GetScreenWidth();
 uint32_t GetScreenHeight();
+uint32_t GetInternalResolution();
 const std::string& GetUserName();
 int32_t  GetUserId();
 const std::string& GetAudioInputDevice();

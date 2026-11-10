@@ -1691,8 +1691,8 @@ vk::Rect2D TextureCache::BeginColorRendering(Image& image, vk::Format format, ui
 		attachment.clearValue = *clear;
 	}
 	vk::RenderingInfo rendering {};
-	rendering.renderArea.extent    = {std::max(image.info.extent.width >> level, 1u),
-	                                  std::max(image.info.extent.height >> level, 1u)};
+	rendering.renderArea.extent    = {std::max(image.backing.extent.width >> level, 1u),
+	                                  std::max(image.backing.extent.height >> level, 1u)};
 	rendering.layerCount           = layers;
 	rendering.colorAttachmentCount = 1;
 	rendering.pColorAttachments    = &attachment;

@@ -176,8 +176,37 @@ uint32_t RowCenter(EmitterState& state, ImageDimension dimension) {
 	return ImageDimensionInfoFor(dimension).one_dimensional ? ConstantF32Value(state, 0.5f) : 0u;
 }
 
+// --internal-resolution: the part of a guest texel that image `resource` lacks on the axis at
+// `shift`, in 1/65536; 0 for an image of the guest's size.
+uint32_t ImageScaleLoss(EmitterState& state, uint32_t resource, uint32_t shift) {
+	const auto word =
+	    EmitShaderDataDwordLoad(state, state.program.bindings.ScaleDword() + resource);
+	return EmitNative<spv::OpBitFieldUExtract, IR::Type::U32>(
+	    state, word, ConstantU32(state, shift), ConstantU32(state, 16));
+}
+
+// A guest texel coordinate on the host image: x - ceil(x * loss / 65536).
+uint32_t HostTexel(EmitterState& state, uint32_t value, uint32_t loss) {
+	const auto u32     = TypeU32(state);
+	const auto product = Binary(state, spv::OpIMul, u32, value, loss);
+	const auto rounded = Binary(state, spv::OpIAdd, u32, product, ConstantU32(state, 0xffffu));
+	const auto dropped =
+	    Binary(state, spv::OpShiftRightLogical, u32, rounded, ConstantU32(state, 16));
+	return Binary(state, spv::OpISub, u32, value, dropped);
+}
+
+// The guest size of a host image size: size * 65536 / (65536 - loss), rounded.
+uint32_t GuestSize(EmitterState& state, uint32_t value, uint32_t loss) {
+	const auto u32   = TypeU32(state);
+	const auto ratio = Binary(state, spv::OpISub, u32, ConstantU32(state, 65536u), loss);
+	const auto wide  = Binary(state, spv::OpShiftLeftLogical, u32, value, ConstantU32(state, 16));
+	const auto half  = Binary(state, spv::OpShiftRightLogical, u32, ratio, ConstantU32(state, 1));
+	return Binary(state, spv::OpUDiv, u32, Binary(state, spv::OpIAdd, u32, wide, half), ratio);
+}
+
+// `scaled` names the image whose host size the coordinate is brought to.
 uint32_t CoordU32(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::Inst& address,
-                  ImageDimension dimension) {
+                  ImageDimension dimension, uint32_t scaled = UINT32_MAX) {
 	const auto& info = ImageDimensionInfoFor(dimension);
 	uint32_t    values[3] {AddressU32(ctx, mem, address, 0)};
 	uint32_t    count = 1;
@@ -186,6 +215,11 @@ uint32_t CoordU32(ValueEmitContext& ctx, const IR::MemoryInfo& mem, const IR::In
 		values[count++] = mem.image_address_components > index
 		                      ? AddressU32(ctx, mem, address, index)
 		                      : ConstantU32(ctx.state, 0);
+	}
+	if (scaled != UINT32_MAX && ctx.state.program.bindings.scale_dwords != 0 &&
+	    !info.one_dimensional && count >= 2u) {
+		values[0] = HostTexel(ctx.state, values[0], ImageScaleLoss(ctx.state, scaled, 0));
+		values[1] = HostTexel(ctx.state, values[1], ImageScaleLoss(ctx.state, scaled, 16));
 	}
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(ctx.state, count),
@@ -312,6 +346,11 @@ uint32_t QueryDimensions(ValueEmitContext& ctx, const IR::MemoryInfo& mem,
 		result[index]        = ctx.state.builder.AllocateId();
 		ctx.state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(ctx.state), result[index],
 		                              size, component);
+		// The guest computes with its own size of an image --internal-resolution made smaller.
+		if (ctx.state.program.bindings.scale_dwords != 0 && !info.one_dimensional && index < 2u) {
+			result[index] = GuestSize(ctx.state, result[index],
+			                          ImageScaleLoss(ctx.state, resource, index * 16u));
+		}
 	}
 	if (info.multisampled == 0u) {
 		result[3] = ctx.state.builder.AllocateId();
@@ -933,7 +972,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				        const auto& dimension_info = ImageDimensionInfoFor(dimension);
 				        const auto descriptor = LoadImageDescriptor(state, resource, 0u, array_index);
 				        const auto fetched = state.builder.AllocateId();
-				        const auto coord = CoordU32(ctx, mem, *address, dimension);
+				        const auto coord = CoordU32(ctx, mem, *address, dimension, resource);
 				        if (dimension_info.multisampled != 0u) {
 					        state.builder.AddFunction(
 					            spv::OpImageFetch, result_type, fetched,
@@ -958,7 +997,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 				selected.resource = resource;
 				const auto mip_lod = candidate.mip_mode == IR::ImageMipMode::Dynamic
 				    ? LodU32(ctx, mem, *address, mem.image_dimension) : 0u;
-				const auto coord = CoordU32(ctx, mem, *address, candidate.dimension);
+				const auto coord = CoordU32(ctx, mem, *address, candidate.dimension, resource);
 				const auto& dimension_info = ImageDimensionInfoFor(candidate.dimension);
 				const auto sample = dimension_info.multisampled != 0u
 				    ? AddressU32(ctx, mem, *address, dimension_info.coordinate_components) : 0u;
@@ -1142,7 +1181,8 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                                  image.atomic64 ? TypeU64(state) : TypeU32(state));
 			           state.builder.AddFunction(spv::OpImageTexelPointer, pointer_type, pointer,
 			                                     ImageDescriptorPointer(state, mem.resource),
-			                                     CoordU32(ctx, mem, *address, dimension),
+			                                     CoordU32(ctx, mem, *address, dimension,
+			                                              mem.resource),
 			                                     ConstantU32(state, 0));
 			           if (op == IR::ValueOpcode::ImageAtomicFMin32 ||
 			               op == IR::ValueOpcode::ImageAtomicFMax32) {

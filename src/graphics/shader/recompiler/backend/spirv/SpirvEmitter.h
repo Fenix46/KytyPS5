@@ -22,6 +22,9 @@ struct Profile {
 	bool r8g8_srgb_views = false;
 	// Native float ops: NaN, signed-zero and denormal results may differ from the guest.
 	bool relaxed_float = false;
+	// --internal-resolution: texel coordinates and image sizes are the guest's, images may be
+	// smaller.
+	bool scaled_images = false;
 };
 
 inline constexpr Profile DefaultProfile {};

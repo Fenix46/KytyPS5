@@ -31,6 +31,9 @@ static void PrintUsage() {
 	    "                                       <dir>, or license only without <dir>. Repeatable.\n");
 	::printf("  --screen-width <num>                 Window width. Default: 1280.\n");
 	::printf("  --screen-height <num>                Window height. Default: 720.\n");
+	::printf("  --internal-resolution <height>       Experimental: render the 16:9 targets of the game at\n"
+	         "                                       no more than this height (for example 1080 or 720).\n"
+	         "                                       Default: 0, the sizes the game asks for.\n");
 	::printf(
 	    "  --user-name <name>                   Local user name (1-16 bytes). Default: Kyty.\n");
 	::printf("  --user-id <num>                      Local user ID. Default: %d.\n",
@@ -319,6 +322,13 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			if (!ParseUint32(value, options.config.screen_height) ||
 			    options.config.screen_height == 0) {
 				::printf("invalid screen height: %s\n", value.c_str());
+				return false;
+			}
+		} else if (arg == "--internal-resolution") {
+			if (!ParseUint32(value, options.config.internal_resolution) ||
+			    (options.config.internal_resolution != 0 &&
+			     options.config.internal_resolution < 240)) {
+				::printf("invalid internal resolution: %s\n", value.c_str());
 				return false;
 			}
 		} else if (arg == "--user-name") {

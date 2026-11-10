@@ -40,6 +40,10 @@ uint32_t GetScreenHeight() {
 	return g_config->screen_height;
 }
 
+uint32_t GetInternalResolution() {
+	return g_config->internal_resolution;
+}
+
 const std::string& GetUserName() {
 	return g_config->user_name;
 }

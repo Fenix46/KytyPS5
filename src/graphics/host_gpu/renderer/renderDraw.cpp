@@ -45,6 +45,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -320,7 +321,14 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 
 	const auto& ctx = buffer.GetRegisters();
 	const auto&        vp  = ctx.GetScreenViewport();
-	const vk::Extent2D framebuffer_extent {rendering.width, rendering.height};
+	const vk::Extent2D framebuffer_extent {rendering.guest_width, rendering.guest_height};
+	// Under --internal-resolution the targets are smaller than the guest's coordinates say.
+	const bool  scaled  = rendering.width != rendering.guest_width ||
+	                      rendering.height != rendering.guest_height;
+	const float scale_x = static_cast<float>(rendering.width) /
+	                      static_cast<float>(rendering.guest_width);
+	const float scale_y = static_cast<float>(rendering.height) /
+	                      static_cast<float>(rendering.guest_height);
 	const auto& outputs = vs_input_info.stage.module->info.info.outputs;
 	const bool  indexed_viewports =
 	    std::any_of(outputs.begin(), outputs.end(), [](const auto& output) {
@@ -353,6 +361,23 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 		scissor.offset = {final_scissor.left, final_scissor.top};
 		scissor.extent = {static_cast<uint32_t>(final_scissor.right - final_scissor.left),
 		                  static_cast<uint32_t>(final_scissor.bottom - final_scissor.top)};
+		if (scaled) {
+			if (!ctx.GetClipControl().clip_disable) {
+				viewport.x *= scale_x;
+				viewport.y *= scale_y;
+				viewport.width *= scale_x;
+				viewport.height *= scale_y;
+			}
+			const auto left   = static_cast<int32_t>(std::floor(final_scissor.left * scale_x));
+			const auto top    = static_cast<int32_t>(std::floor(final_scissor.top * scale_y));
+			const auto right  = std::min(static_cast<int32_t>(rendering.width),
+			                             static_cast<int32_t>(std::ceil(final_scissor.right * scale_x)));
+			const auto bottom = std::min(static_cast<int32_t>(rendering.height),
+			                             static_cast<int32_t>(std::ceil(final_scissor.bottom * scale_y)));
+			scissor.offset = vk::Offset2D {left, top};
+			scissor.extent = vk::Extent2D {static_cast<uint32_t>(std::max(right - left, 0)),
+			                               static_cast<uint32_t>(std::max(bottom - top, 0))};
+		}
 		if (viewport.width == 0.0f) {
 			// Keep empty slots at their guest index; Vulkan requires a positive viewport width.
 			viewport.width = 1.0f;
@@ -454,8 +479,12 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 	RenderState state {};
 	state.width                 = std::numeric_limits<uint32_t>::max();
 	state.height                = std::numeric_limits<uint32_t>::max();
+	state.guest_width           = std::numeric_limits<uint32_t>::max();
+	state.guest_height          = std::numeric_limits<uint32_t>::max();
 	state.num_layers            = std::numeric_limits<uint32_t>::max();
 	state.num_color_attachments = 0;
+	uint32_t targets            = 0;
+	uint32_t scaled_targets     = 0;
 	for (uint32_t i = 0; i < color_count; i++) {
 		auto& target = colors[i];
 		EXIT_IF(!target.image_id);
@@ -472,9 +501,14 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
 		              buffer.Handle());
-		const auto extent       = target.Extent();
+		const auto guest        = target.Extent();
+		const auto extent       = image.HostExtent(guest);
 		state.width             = std::min(state.width, extent.width);
 		state.height            = std::min(state.height, extent.height);
+		state.guest_width       = std::min(state.guest_width, guest.width);
+		state.guest_height      = std::min(state.guest_height, guest.height);
+		scaled_targets += image.IsScaled() ? 1u : 0u;
+		targets++;
 		state.num_layers        = std::min(state.num_layers, view.layer_count);
 		state.num_color_attachments = std::max(state.num_color_attachments, target.target_slot + 1);
 		auto& attachment            = state.color_attachments[target.target_slot];
@@ -535,8 +569,14 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
 		              buffer.Handle());
-		state.width               = std::min(state.width, depth.desc.info.extent.width);
-		state.height              = std::min(state.height, depth.desc.info.extent.height);
+		const vk::Extent2D guest {depth.desc.info.extent.width, depth.desc.info.extent.height};
+		const auto         extent = image.HostExtent(guest);
+		state.width               = std::min(state.width, extent.width);
+		state.height              = std::min(state.height, extent.height);
+		state.guest_width         = std::min(state.guest_width, guest.width);
+		state.guest_height        = std::min(state.guest_height, guest.height);
+		scaled_targets += image.IsScaled() ? 1u : 0u;
+		targets++;
 		state.num_layers          = std::min(state.num_layers, view.layer_count);
 		const auto aspects        = ImageViewOps::DepthAspectMask(depth.desc.view_info.format);
 		auto&      attachment     = state.depth_stencil_attachment;
@@ -555,6 +595,17 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		const auto& limits = buffer.GetGraphics().GetPhysicalDeviceProperties().limits;
 		state.width        = limits.maxFramebufferWidth;
 		state.height       = limits.maxFramebufferHeight;
+		state.guest_width  = state.width;
+		state.guest_height = state.height;
+	}
+	if (scaled_targets != 0 && scaled_targets != targets) {
+		// Attachments of one draw that did not shrink together: the draw covers the wrong area.
+		static std::atomic_bool logged = false;
+		if (!logged.exchange(true, std::memory_order_relaxed)) {
+			std::printf("[scale] a draw mixes scaled and unscaled targets: guest %ux%u, host "
+			            "%ux%u\n",
+			            state.guest_width, state.guest_height, state.width, state.height);
+		}
 	}
 	if (state.num_layers == std::numeric_limits<uint32_t>::max()) {
 		state.num_layers = 1;
@@ -1020,8 +1071,18 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	EXIT_NOT_IMPLEMENTED((source.backing.format != vk::Format::eD32Sfloat &&
 	                      source.backing.format != vk::Format::eD32SfloatS8Uint) ||
 	                     destination.backing.format != vk::Format::eR32Sfloat);
-	const auto rect = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(),
-	                                    {rendering.width, rendering.height}, 0);
+	auto rect = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(),
+	                               {rendering.guest_width, rendering.guest_height}, 0);
+	if (rendering.width != rendering.guest_width || rendering.height != rendering.guest_height) {
+		// Both images are smaller than the guest's coordinates under --internal-resolution.
+		const auto map = [](auto value, uint32_t host, uint32_t guest) {
+			return static_cast<decltype(value)>(static_cast<int64_t>(value) * host / guest);
+		};
+		rect.left   = map(rect.left, rendering.width, rendering.guest_width);
+		rect.right  = map(rect.right, rendering.width, rendering.guest_width);
+		rect.top    = map(rect.top, rendering.height, rendering.guest_height);
+		rect.bottom = map(rect.bottom, rendering.height, rendering.guest_height);
+	}
 	if (rect.right > rect.left && rect.bottom > rect.top) {
 		const vk::ImageCopy region {
 		    {vk::ImageAspectFlagBits::eDepth, depth.desc.view_info.base_level,
@@ -1108,6 +1169,16 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (state.ps_active) {
 		PrepareBindings(state.ps_input_info.stage, bindings.pixel);
 		descriptor_stages[stage_count++] = &bindings.pixel;
+		// --internal-resolution: gl_FragCoord counts the pixels of the smaller targets.
+		if (const auto& layout = state.ps_input_info.stage.module->info.bindings;
+		    layout.scale_dwords != 0) {
+			const auto target = state.color_count != 0 ? state.color_info[0].image_id
+			                                           : state.depth_info.image_id;
+			if (target) {
+				bindings.pixel.shader_data[layout.ScaleDword() + layout.scale_dwords - 1u] =
+				    m_context.GetTextureCache().GetImage(target).ScaleLoss();
+			}
+		}
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
@@ -1219,10 +1290,29 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (GpuProfiler::Active()) {
 		const auto vs_hash = state.vertex_info[0].stage.module->info.shader_hash;
 		const auto ps_hash = state.ps_active ? state.ps_input_info.stage.module->info.shader_hash : 0;
+		// Work: the primitives a mesh draw feeds in, the indices of any other draw.
+		const auto mesh_work = std::min<uint64_t>(
+		    uint64_t {mesh_groups} * draw.instance_count * mesh.primitives_per_group, UINT32_MAX);
 		gpu_profile_slot = GpuProfiler::Begin(
 		    vk_buffer, m_context.GetCommandScheduler(),
 		    vs_hash * 0x9e3779b97f4a7c15ull ^ ps_hash ^ (mesh_active ? 1u : 0u), vs_hash, ps_hash,
-		    mesh_active ? 1u : 0u, mesh_active ? mesh_groups : draw.index_count);
+		    mesh_active ? 1u : 0u,
+		    mesh_active ? static_cast<uint32_t>(mesh_work) : draw.index_count, rendering.width,
+		    rendering.height);
+		if (mesh_active) {
+			static std::unordered_set<uint64_t> described;
+			if (described.size() < 64 && described.insert(vs_hash).second) {
+				std::printf("[mesh] a=%016llx input=%u indexed=%u task=%u fast_launch=%u wave=%u "
+				            "prims/group=%u verts/group=%u max_verts=%u max_prims=%u threads=%u "
+				            "lds=%u dwords, first draw: %u groups x %u instances, target %ux%u\n",
+				            static_cast<unsigned long long>(vs_hash), mesh.input_primitive,
+				            draw.indexed ? 1u : 0u, mesh_task ? 1u : 0u, mesh.fast_launch ? 1u : 0u,
+				            mesh.wave_size, mesh.primitives_per_group, mesh.vertices_per_group,
+				            mesh.max_vertices, mesh.max_primitives, mesh.threads_num[0],
+				            mesh.lds_size_dwords, mesh_groups, draw.instance_count, rendering.width,
+				            rendering.height);
+			}
+		}
 	}
 	if (mesh_task) {
 		vk_buffer.drawMeshTasksEXT(emit.indirect.count, 1, 1);
